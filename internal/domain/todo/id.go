@@ -1,12 +1,18 @@
 package todo
 
 import (
-	"math/rand"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
-// TaskIDLength — длина строкового представления TaskID: 16 случайных байт в hex.
-const TaskIDLength = 32
+// taskIDBytes — размер идентификатора до hex-кодирования. 16 байт (128 бит)
+// дают ту же вероятность коллизии, что и UUIDv4, без внешних зависимостей.
+const taskIDBytes = 16
+
+// TaskIDLength — длина строкового представления TaskID: taskIDBytes в hex.
+const TaskIDLength = taskIDBytes * 2
 
 // TaskID — идентификатор задачи. Значимый объект: сравнимый, неизменяемый,
 // создаётся только через NewTaskID или ParseTaskID.
@@ -14,38 +20,29 @@ type TaskID struct {
 	value string
 }
 
-const valid = "0123456789abcdef0123456789abcdef"
-
-var r = rand.New(rand.NewSource(2))
-
-func gen(len int) string {
-	var s []byte
-	for i := 0; i < TaskIDLength; i++ {
-		s = append(s, valid[r.Intn(len)])
-	}
-	return string(s)
-}
-
 // NewTaskID генерирует новый идентификатор из криптографически стойкого
-// источника случайности.
+// источника случайности. Безопасен для вызова из нескольких горутин.
 func NewTaskID() (TaskID, error) {
-	return TaskID{gen(TaskIDLength)}, nil
+	var buf [taskIDBytes]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return TaskID{}, fmt.Errorf("todo: сгенерировать идентификатор задачи: %w", err)
+	}
+	return TaskID{value: hex.EncodeToString(buf[:])}, nil
 }
 
 // ParseTaskID восстанавливает идентификатор из внешнего представления —
 // например, из строки, прочитанной из хранилища или пришедшей в запросе.
 func ParseTaskID(s string) (TaskID, error) {
-	s = strings.TrimSpace(s)
-	s = strings.ToLower(s)
+	s = strings.ToLower(strings.TrimSpace(s))
+
 	if len(s) != TaskIDLength {
-		return TaskID{}, ErrInvalidTaskID
+		return TaskID{}, fmt.Errorf("%w: длина %d, ожидалось %d", ErrInvalidTaskID, len(s), TaskIDLength)
 	}
-	for _, ch := range s {
-		if !strings.Contains(valid, string(ch)) {
-			return TaskID{}, ErrInvalidTaskID
-		}
+	if _, err := hex.DecodeString(s); err != nil {
+		return TaskID{}, fmt.Errorf("%w: %w", ErrInvalidTaskID, err)
 	}
-	return TaskID{s}, nil
+
+	return TaskID{value: s}, nil
 }
 
 // String возвращает строковое представление идентификатора.
@@ -66,12 +63,13 @@ type OwnerID struct {
 }
 
 // ParseOwnerID восстанавливает идентификатор владельца из строки.
+// Формат непрозрачен: чужой контекст волен выдавать что угодно непустое.
 func ParseOwnerID(s string) (OwnerID, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return OwnerID{}, ErrInvalidOwnerID
 	}
-	return OwnerID{s}, nil
+	return OwnerID{value: s}, nil
 }
 
 // String возвращает строковое представление идентификатора владельца.

@@ -3,6 +3,7 @@ package todo_test
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
@@ -42,6 +43,52 @@ func TestNewTaskIDIsUnique(t *testing.T) {
 			t.Fatalf("NewTaskID() вернул повторяющийся идентификатор %q", id.String())
 		}
 		seen[id] = struct{}{}
+	}
+}
+
+func TestNewTaskIDIsConcurrencySafe(t *testing.T) {
+	t.Parallel()
+
+	// Идентификаторы раздаются на каждый входящий запрос, то есть из многих
+	// горутин сразу: генератор обязан быть потокобезопасным сам по себе,
+	// без блокировки на стороне вызывающего.
+	const (
+		goroutines   = 8
+		perGoroutine = 256
+		total        = goroutines * perGoroutine
+	)
+
+	ids := make(chan todo.TaskID, total)
+
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for range perGoroutine {
+				id, err := todo.NewTaskID()
+				if err != nil {
+					t.Errorf("NewTaskID() вернул ошибку: %v", err)
+					return
+				}
+				ids <- id
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[todo.TaskID]struct{}, total)
+	for id := range ids {
+		if _, duplicate := seen[id]; duplicate {
+			t.Fatalf("NewTaskID() вернул повторяющийся идентификатор %q", id.String())
+		}
+		seen[id] = struct{}{}
+	}
+
+	if len(seen) != total {
+		t.Errorf("получено %d идентификаторов, ожидалось %d", len(seen), total)
 	}
 }
 
