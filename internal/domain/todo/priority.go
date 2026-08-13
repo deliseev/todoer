@@ -16,53 +16,40 @@ const (
 	PriorityCritical
 )
 
-const (
-	normal   = "normal"
-	low      = "low"
-	high     = "high"
-	critical = "critical"
-	unknown  = "unknown"
-)
+// priorityNames — единственный источник правды об именах приоритетов.
+// И String, и ParsePriority читают эту таблицу, поэтому разойтись им негде,
+// а новый приоритет добавляется одной строкой.
+var priorityNames = [...]string{
+	PriorityNormal:   "normal",
+	PriorityLow:      "low",
+	PriorityHigh:     "high",
+	PriorityCritical: "critical",
+}
 
 // ParsePriority разбирает приоритет из строки без учёта регистра
 // и окружающих пробелов.
 func ParsePriority(s string) (Priority, error) {
-	var p Priority
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case normal:
-		p = PriorityNormal
-	case low:
-		p = PriorityLow
-	case high:
-		p = PriorityHigh
-	case critical:
-		p = PriorityCritical
-	default:
-		return Priority(0), ErrUnknownPriority
+	name := strings.ToLower(strings.TrimSpace(s))
+
+	for i, candidate := range priorityNames {
+		if candidate != "" && candidate == name {
+			return Priority(i), nil
+		}
 	}
-	return p, nil
+
+	return PriorityNormal, ErrUnknownPriority
 }
 
 // String возвращает каноническое имя приоритета в нижнем регистре.
 // Для неизвестного значения возвращает "unknown".
 func (p Priority) String() string {
-	var s string
-	switch p {
-	case PriorityNormal:
-		s = normal
-	case PriorityLow:
-		s = low
-	case PriorityHigh:
-		s = high
-	case PriorityCritical:
-		s = critical
-	default:
-		s = unknown
+	if !p.IsValid() {
+		return "unknown"
 	}
-	return s
+	return priorityNames[p]
 }
 
 // IsValid сообщает, что значение входит в список допустимых приоритетов.
 func (p Priority) IsValid() bool {
-	return p.String() != "unknown"
+	return int(p) < len(priorityNames) && priorityNames[p] != ""
 }
