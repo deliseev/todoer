@@ -12,16 +12,19 @@ type DueDate struct {
 // NewDueDate проверяет срок относительно момента now.
 // Срок, совпадающий с now или предшествующий ему, отвергается.
 func NewDueDate(at, now time.Time) (DueDate, error) {
-	utcAt := at.UTC()
-	if utcAt.IsZero() || utcAt.Before(now) || utcAt == now {
+	// Сравнивать моменты времени можно только методами After/Before/Equal.
+	// Оператор == у time.Time сличает не момент, а внутреннее представление:
+	// стенные часы, монотонный отсчёт и указатель на зону. Два одинаковых
+	// мгновения в разных зонах для него не равны.
+	if !at.After(now) {
 		return DueDate{}, ErrDueDateInPast
 	}
-	return DueDate{at: utcAt}, nil
+	return DueDate{at: at.UTC()}, nil
 }
 
 // Time возвращает момент наступления срока в UTC.
 func (d DueDate) Time() time.Time {
-	return d.at.UTC()
+	return d.at
 }
 
 // IsZero сообщает, что срок не был инициализирован.

@@ -104,6 +104,39 @@ func TestDueDateNormalizedToUTC(t *testing.T) {
 	}
 }
 
+func TestNewDueDateComparesInstants(t *testing.T) {
+	t.Parallel()
+
+	msk := time.FixedZone("MSK", 3*60*60)
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	// time.Now несёт монотонные часы — так его вернёт SystemClock в бою.
+	monotonic := time.Now()
+
+	// Во всех случаях срок совпадает с now с точностью до наносекунды,
+	// то есть «в будущем» не наступает и должен быть отвергнут.
+	tests := []struct {
+		name string
+		at   time.Time
+		now  time.Time
+	}{
+		{name: "оба момента в UTC", at: at, now: at},
+		{name: "now записан в другой зоне", at: at, now: at.In(msk)},
+		{name: "срок записан в другой зоне", at: at.In(msk), now: at},
+		{name: "now с монотонными часами", at: monotonic, now: monotonic},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := todo.NewDueDate(tt.at, tt.now); !errors.Is(err, todo.ErrDueDateInPast) {
+				t.Errorf("NewDueDate(%s, %s) вернул ошибку %v, ожидалась ErrDueDateInPast",
+					tt.at, tt.now, err)
+			}
+		})
+	}
+}
+
 func TestDueDateIsBefore(t *testing.T) {
 	t.Parallel()
 
