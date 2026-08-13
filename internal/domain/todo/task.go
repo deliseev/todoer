@@ -350,6 +350,6 @@ func (t *Task) IsOverdue(now time.Time) bool {
 // и очищает внутренний буфер: повторный вызов вернёт пустой срез.
 func (t *Task) PullEvents() []DomainEvent {
 	events := t.events
-	t.events = make([]DomainEvent, 0)
+	t.events = nil
 	return events
 }

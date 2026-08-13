@@ -24,7 +24,7 @@ func NewTitle(s string) (Title, error) {
 	if utf8.RuneCountInString(trimTitle) > MaxTitleLength {
 		return Title{}, ErrTitleTooLong
 	}
-	return Title{trimTitle}, nil
+	return Title{value: trimTitle}, nil
 }
 
 // String возвращает нормализованный заголовок.

@@ -20,7 +20,7 @@ func NewDescription(s string) (Description, error) {
 	if utf8.RuneCountInString(trimDescription) > MaxDescriptionLength {
 		return Description{}, ErrDescriptionTooLong
 	}
-	return Description{trimDescription}, nil
+	return Description{value: trimDescription}, nil
 }
 
 // String возвращает нормализованное описание.

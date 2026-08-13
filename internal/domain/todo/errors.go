@@ -37,8 +37,3 @@ var (
 	// ErrTaskCancelled — задача отменена, изменять её нельзя.
 	ErrTaskCancelled = errors.New("todo: task is cancelled")
 )
-
-// errNotImplemented возвращают скелеты доменной модели на красной фазе TDD.
-// Ни один тест не должен на неё полагаться — она исчезнет вместе с последним
-// незаполненным телом функции на зелёной фазе.
-var errNotImplemented = errors.New("todo: not implemented")
