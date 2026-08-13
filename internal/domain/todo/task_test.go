@@ -324,66 +324,170 @@ func TestTaskRename(t *testing.T) {
 	}
 }
 
-func TestTaskMutationsRejectedOnCompleted(t *testing.T) {
-	t.Parallel()
+// mutation — именованная операция изменения задачи.
+//
+// Список мутаций один на все тесты: пока каждый тест перечисляет операции
+// заново, следующая операция снова окажется покрыта наполовину — ровно так
+// в модели и разошлись updatedAt и проверка терминальных статусов.
+type mutation struct {
+	name  string
+	apply func(t *testing.T, task *todo.Task, now time.Time) error
+}
 
-	tests := []struct {
-		name   string
-		action func(*testing.T, *todo.Task) error
-	}{
+// fieldMutations — операции, меняющие поля задачи, но не её статус.
+func fieldMutations() []mutation {
+	return []mutation{
 		{
 			name: "переименование",
-			action: func(t *testing.T, task *todo.Task) error {
-				return task.Rename(mustTitle(t, "Купить кефир"), testEvenLater)
+			apply: func(t *testing.T, task *todo.Task, now time.Time) error {
+				return task.Rename(mustTitle(t, "Купить кефир"), now)
 			},
 		},
 		{
 			name: "смена описания",
-			action: func(t *testing.T, task *todo.Task) error {
-				return task.Describe(mustDescription(t, "Уже неважно"), testEvenLater)
+			apply: func(t *testing.T, task *todo.Task, now time.Time) error {
+				return task.Describe(mustDescription(t, "Лучше взять два по литру"), now)
 			},
 		},
 		{
 			name: "смена приоритета",
-			action: func(t *testing.T, task *todo.Task) error {
-				return task.ChangePriority(todo.PriorityCritical, testEvenLater)
+			apply: func(t *testing.T, task *todo.Task, now time.Time) error {
+				return task.ChangePriority(todo.PriorityCritical, now)
 			},
 		},
 		{
 			name: "перенос срока",
-			action: func(t *testing.T, task *todo.Task) error {
-				due, err := todo.NewDueDate(testEvenLater.Add(24*time.Hour), testEvenLater)
+			apply: func(t *testing.T, task *todo.Task, now time.Time) error {
+				due, err := todo.NewDueDate(now.Add(24*time.Hour), now)
 				if err != nil {
 					t.Fatalf("NewDueDate(...) вернул ошибку: %v", err)
 				}
-				return task.Reschedule(&due, testEvenLater)
+				return task.Reschedule(&due, now)
 			},
 		},
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+// statusMutations — операции, двигающие задачу по конечному автомату.
+// Все они допустимы из статуса pending.
+func statusMutations() []mutation {
+	return []mutation{
+		{
+			name:  "взятие в работу",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error { return task.Start(now) },
+		},
+		{
+			name:  "выполнение",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error { return task.Complete(now) },
+		},
+		{
+			name:  "отмена",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error { return task.Cancel(now) },
+		},
+	}
+}
+
+func TestTaskMutationsRejectedOnTerminalStatus(t *testing.T) {
+	t.Parallel()
+
+	// Терминальный статус означает, что задача дожила до конца жизненного
+	// цикла: менять её поля нельзя независимо от того, каким именно образом
+	// она туда попала.
+	terminals := []struct {
+		name    string
+		close   func(*testing.T, *todo.Task)
+		wantErr error
+	}{
+		{name: "выполненная", close: completeTask, wantErr: todo.ErrTaskAlreadyCompleted},
+		{name: "отменённая", close: cancelTask, wantErr: todo.ErrTaskCancelled},
+	}
+
+	for _, terminal := range terminals {
+		for _, mut := range fieldMutations() {
+			t.Run(terminal.name+"/"+mut.name, func(t *testing.T) {
+				t.Parallel()
+
+				task := newTestTask(t)
+				terminal.close(t, task)
+
+				wantTitle := task.Title()
+				wantDescription := task.Description()
+				wantPriority := task.Priority()
+				wantStatus := task.Status()
+				wantVersion := task.Version()
+				wantUpdatedAt := task.UpdatedAt()
+
+				if err := mut.apply(t, task, testEvenLater); !errors.Is(err, terminal.wantErr) {
+					t.Fatalf("операция вернула ошибку %v, ожидалась %v", err, terminal.wantErr)
+				}
+
+				if task.Title() != wantTitle {
+					t.Errorf("после отклонённой операции заголовок = %q, ожидалось %q",
+						task.Title().String(), wantTitle.String())
+				}
+				if task.Description() != wantDescription {
+					t.Errorf("после отклонённой операции описание = %q, ожидалось %q",
+						task.Description().String(), wantDescription.String())
+				}
+				if task.Priority() != wantPriority {
+					t.Errorf("после отклонённой операции приоритет = %s, ожидалось %s",
+						task.Priority(), wantPriority)
+				}
+				if _, ok := task.DueDate(); ok {
+					t.Error("после отклонённой операции у задачи появился срок")
+				}
+				assertUnchanged(t, task, wantStatus, wantVersion, wantUpdatedAt)
+			})
+		}
+	}
+}
+
+func TestTaskMutationsAdvanceUpdatedAtAndVersion(t *testing.T) {
+	t.Parallel()
+
+	// Всякая успешная мутация — это новое состояние агрегата: она обязана
+	// сдвинуть updatedAt и версию. По updatedAt хранилище строит ленту,
+	// по версии работает оптимистичная блокировка.
+	for _, mut := range append(fieldMutations(), statusMutations()...) {
+		t.Run(mut.name, func(t *testing.T) {
 			t.Parallel()
 
 			task := newTestTask(t)
-			completeTask(t, task)
 
-			wantTitle := task.Title()
-			wantStatus := task.Status()
-			wantVersion := task.Version()
-			wantUpdatedAt := task.UpdatedAt()
-
-			if err := tt.action(t, task); !errors.Is(err, todo.ErrTaskAlreadyCompleted) {
-				t.Fatalf("операция вернула ошибку %v, ожидалась ErrTaskAlreadyCompleted", err)
+			if err := mut.apply(t, task, testLater); err != nil {
+				t.Fatalf("операция вернула ошибку: %v", err)
 			}
 
-			if task.Title() != wantTitle {
-				t.Errorf("после отклонённой операции заголовок = %q, ожидалось %q",
-					task.Title().String(), wantTitle.String())
+			if !task.UpdatedAt().Equal(testLater) {
+				t.Errorf("Task.UpdatedAt() = %s, ожидалось %s", task.UpdatedAt(), testLater)
 			}
-			assertUnchanged(t, task, wantStatus, wantVersion, wantUpdatedAt)
+			if task.Version() != 2 {
+				t.Errorf("Task.Version() = %d, ожидалось 2", task.Version())
+			}
+			if !task.CreatedAt().Equal(testNow) {
+				t.Errorf("Task.CreatedAt() = %s, момент создания менять нельзя", task.CreatedAt())
+			}
 		})
 	}
+}
+
+func TestTaskStartTwice(t *testing.T) {
+	t.Parallel()
+
+	// Единственный источник правды о переходах — Status.CanTransitionTo,
+	// и переход в собственный статус он запрещает.
+	task := newTestTask(t)
+	if err := task.Start(testLater); err != nil {
+		t.Fatalf("Task.Start(...) вернул ошибку: %v", err)
+	}
+
+	wantVersion := task.Version()
+	wantUpdatedAt := task.UpdatedAt()
+
+	if err := task.Start(testMuchLater); !errors.Is(err, todo.ErrInvalidStatusTransition) {
+		t.Fatalf("повторный Task.Start(...) вернул ошибку %v, ожидалась ErrInvalidStatusTransition", err)
+	}
+	assertUnchanged(t, task, todo.StatusInProgress, wantVersion, wantUpdatedAt)
 }
 
 func TestTaskRenameToZeroTitle(t *testing.T) {

@@ -183,72 +183,96 @@ func (t *Task) CompletedAt() (time.Time, bool) {
 // Version возвращает версию агрегата.
 func (t *Task) Version() int { return t.version }
 
-// Rename меняет заголовок задачи.
-func (t *Task) Rename(title Title, now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
+// ensureMutable проверяет, что задача ещё принимает изменения.
+//
+// Единственный источник правды о том, кончилась ли жизнь задачи, —
+// Status.IsTerminal: пока агрегат перечислял терминальные статусы сам,
+// он успел разойтись со своим же конечным автоматом.
+func (t *Task) ensureMutable() error {
+	if !t.status.IsTerminal() {
+		return nil
 	}
-	title, err := NewTitle(title.value)
-	if err != nil {
+
+	switch t.status {
+	case StatusCompleted:
+		return ErrTaskAlreadyCompleted
+	case StatusCancelled:
+		return ErrTaskCancelled
+	default:
+		return ErrInvalidStatusTransition
+	}
+}
+
+// meta собирает общую часть доменного события.
+func (t *Task) meta(now time.Time) eventMeta {
+	return eventMeta{taskID: t.id, at: now}
+}
+
+// apply фиксирует состоявшуюся мутацию: двигает момент изменения и версию
+// агрегата, а событие ставит в очередь на выдачу.
+//
+// Вызывается последней строкой каждого мутатора — ровно затем, чтобы забыть
+// одну из трёх частей было негде.
+func (t *Task) apply(now time.Time, event DomainEvent) {
+	t.updatedAt = now
+	t.version++
+	t.events = append(t.events, event)
+}
+
+// transitionTo переводит задачу в target, сверяясь с конечным автоматом.
+func (t *Task) transitionTo(target Status, now time.Time, event DomainEvent) error {
+	if err := t.ensureMutable(); err != nil {
 		return err
 	}
-	t.title = title
-	t.updatedAt = now
-	t.version += 1
-
-	e := TaskRenamed{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-		NewTitle: title,
+	if !t.status.CanTransitionTo(target) {
+		return ErrInvalidStatusTransition
 	}
-	t.events = append(t.events, e)
+
+	t.status = target
+	t.apply(now, event)
 
 	return nil
 }
 
-// Describe меняет описание задачи.
-func (t *Task) Describe(description Description, now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
+// Rename меняет заголовок задачи.
+func (t *Task) Rename(title Title, now time.Time) error {
+	if err := t.ensureMutable(); err != nil {
+		return err
 	}
-	t.description = description
-	t.updatedAt = now
-	t.version += 1
+	if title.IsZero() {
+		return ErrEmptyTitle
+	}
 
-	e := TaskDescribed{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-		NewDescription: description,
+	t.title = title
+	t.apply(now, TaskRenamed{eventMeta: t.meta(now), NewTitle: title})
+
+	return nil
+}
+
+// Describe меняет описание задачи. Пустое описание допустимо, поэтому
+// проверять здесь нечего: Description невалидным не бывает.
+func (t *Task) Describe(description Description, now time.Time) error {
+	if err := t.ensureMutable(); err != nil {
+		return err
 	}
-	t.events = append(t.events, e)
+
+	t.description = description
+	t.apply(now, TaskDescribed{eventMeta: t.meta(now), NewDescription: description})
 
 	return nil
 }
 
 // ChangePriority меняет приоритет задачи.
 func (t *Task) ChangePriority(priority Priority, now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
-	}
-	priority, err := ParsePriority(priority.String())
-	if err != nil {
+	if err := t.ensureMutable(); err != nil {
 		return err
 	}
-	t.priority = priority
-	t.version += 1
-
-	e := TaskPriorityChanged{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-		NewPriority: priority,
+	if !priority.IsValid() {
+		return ErrUnknownPriority
 	}
-	t.events = append(t.events, e)
+
+	t.priority = priority
+	t.apply(now, TaskPriorityChanged{eventMeta: t.meta(now), NewPriority: priority})
 
 	return nil
 }
@@ -257,98 +281,39 @@ func (t *Task) ChangePriority(priority Priority, now time.Time) error {
 // Nil снимает срок. Срок, не наступающий в будущем относительно now,
 // отвергается даже если он был корректен в момент своего создания.
 func (t *Task) Reschedule(dueDate *DueDate, now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
+	if err := t.ensureMutable(); err != nil {
+		return err
 	}
-	if dueDate != nil && dueDate.IsBefore(now) {
+	if dueDate != nil && !dueDate.Time().After(now) {
 		return ErrDueDateInPast
 	}
-	t.dueDate = dueDate
-	t.version += 1
 
-	e := TaskRescheduled{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-		NewDueDate: dueDate,
-	}
-	t.events = append(t.events, e)
+	t.dueDate = dueDate
+	t.apply(now, TaskRescheduled{eventMeta: t.meta(now), NewDueDate: dueDate})
 
 	return nil
 }
 
 // Start переводит задачу в работу.
 func (t *Task) Start(now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
-	}
-	if t.status == StatusCancelled {
-		return ErrTaskCancelled
-	}
-	allow := t.status.CanTransitionTo(StatusInProgress)
-	if !allow {
-		return ErrInvalidStatusTransition
-	}
-	t.status = StatusInProgress
-	t.updatedAt = now
-	t.version += 1
-
-	e := TaskStarted{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-	}
-	t.events = append(t.events, e)
-
-	return nil
+	return t.transitionTo(StatusInProgress, now, TaskStarted{eventMeta: t.meta(now)})
 }
 
 // Complete отмечает задачу выполненной.
 func (t *Task) Complete(now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
+	if err := t.transitionTo(StatusCompleted, now, TaskCompleted{eventMeta: t.meta(now)}); err != nil {
+		return err
 	}
-	if t.status == StatusCancelled {
-		return ErrTaskCancelled
-	}
-	t.status = StatusCompleted
-	t.completedAt = &now
-	t.version += 1
 
-	e := TaskCompleted{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-	}
-	t.events = append(t.events, e)
+	completedAt := now
+	t.completedAt = &completedAt
 
 	return nil
 }
 
 // Cancel отменяет задачу.
 func (t *Task) Cancel(now time.Time) error {
-	if t.status == StatusCompleted {
-		return ErrTaskAlreadyCompleted
-	}
-	if t.status == StatusCancelled {
-		return ErrTaskCancelled
-	}
-	t.status = StatusCancelled
-	t.completedAt = nil
-	t.version += 1
-
-	e := TaskCancelled{
-		eventMeta: eventMeta{
-			taskID: t.id,
-			at:     now,
-		},
-	}
-	t.events = append(t.events, e)
-
-	return nil
+	return t.transitionTo(StatusCancelled, now, TaskCancelled{eventMeta: t.meta(now)})
 }
 
 // IsOverdue сообщает, что срок выполнения истёк к моменту now.
