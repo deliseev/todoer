@@ -803,6 +803,117 @@ func TestReconstituteTaskValidation(t *testing.T) {
 	}
 }
 
+func TestTaskDoesNotShareMutableState(t *testing.T) {
+	t.Parallel()
+
+	// Присваивание структуры в Go копирует указатель, а не то, на что он
+	// смотрит. Поэтому всё, что пересекает границу агрегата в виде *DueDate
+	// или *time.Time, обязано быть копией: иначе состояние задачи можно
+	// изменить снаружи, минуя методы, версию и события.
+	t.Run("срок, переданный в конструктор", func(t *testing.T) {
+		t.Parallel()
+
+		due := mustDueDate(t, testTomorrowAt)
+		task := newTestTaskWithDueDate(t, due)
+
+		*due = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+
+		assertDueDate(t, task, testTomorrowAt)
+	})
+
+	t.Run("срок, переданный в Reschedule", func(t *testing.T) {
+		t.Parallel()
+
+		task := newTestTask(t)
+		due := mustDueDate(t, testTomorrowAt)
+		if err := task.Reschedule(due, testLater); err != nil {
+			t.Fatalf("Task.Reschedule(...) вернул ошибку: %v", err)
+		}
+
+		*due = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+
+		assertDueDate(t, task, testTomorrowAt)
+	})
+
+	t.Run("срок в снимке", func(t *testing.T) {
+		t.Parallel()
+
+		task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+		snapshot := task.Snapshot()
+
+		*snapshot.DueDate = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+
+		assertDueDate(t, task, testTomorrowAt)
+	})
+
+	t.Run("момент выполнения в снимке", func(t *testing.T) {
+		t.Parallel()
+
+		task := newTestTask(t)
+		completeTask(t, task)
+		snapshot := task.Snapshot()
+
+		*snapshot.CompletedAt = testEvenLater
+
+		got, ok := task.CompletedAt()
+		if !ok {
+			t.Fatal("задача потеряла момент выполнения")
+		}
+		if !got.Equal(testLater) {
+			t.Errorf("Task.CompletedAt() = %s, ожидалось %s", got, testLater)
+		}
+	})
+
+	t.Run("срок, попавший в снимок при восстановлении", func(t *testing.T) {
+		t.Parallel()
+
+		snapshot := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt)).Snapshot()
+
+		restored, err := todo.ReconstituteTask(snapshot)
+		if err != nil {
+			t.Fatalf("ReconstituteTask(...) вернул ошибку: %v", err)
+		}
+
+		*snapshot.DueDate = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+
+		assertDueDate(t, restored, testTomorrowAt)
+	})
+
+	t.Run("срок в доменном событии", func(t *testing.T) {
+		t.Parallel()
+
+		// Событие — неизменяемый факт о прошлом: изменить его задним числом
+		// не должен никто, включая того, кто его получил.
+		task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+
+		events := task.PullEvents()
+		if len(events) != 1 {
+			t.Fatalf("NewTask породил события %v, ожидалось ровно одно", eventNames(events))
+		}
+		created, ok := events[0].(todo.TaskCreated)
+		if !ok {
+			t.Fatalf("тип события = %T, ожидалось todo.TaskCreated", events[0])
+		}
+
+		*created.DueDate = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+
+		assertDueDate(t, task, testTomorrowAt)
+	})
+}
+
+// assertDueDate проверяет, что срок задачи совпадает с ожидаемым моментом.
+func assertDueDate(t *testing.T, task *todo.Task, want time.Time) {
+	t.Helper()
+
+	got, ok := task.DueDate()
+	if !ok {
+		t.Fatal("задача потеряла срок")
+	}
+	if !got.Time().Equal(want) {
+		t.Errorf("Task.DueDate() = %s, ожидалось %s", got.Time(), want)
+	}
+}
+
 // startTask берёт задачу в работу в момент testLater.
 func startTask(t *testing.T, task *todo.Task) {
 	t.Helper()

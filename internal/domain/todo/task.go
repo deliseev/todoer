@@ -44,6 +44,20 @@ type TaskSnapshot struct {
 	Version     int
 }
 
+// clonePtr возвращает указатель на копию значения, сохраняя nil как nil.
+//
+// Присваивание структуры в Go копирует указатель, а не то, на что он смотрит.
+// Поэтому всё необязательное, что пересекает границу агрегата, копируется
+// явно: иначе получатель снимка или события сможет изменить состояние задачи
+// в обход её методов, версии и событий.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
 // NewTask создаёт новую задачу и порождает событие TaskCreated.
 // Аргумент dueDate необязателен: nil означает задачу без срока.
 func NewTask(
@@ -83,7 +97,7 @@ func NewTask(
 		description: description,
 		status:      StatusPending,
 		priority:    priority,
-		dueDate:     dueDate,
+		dueDate:     clonePtr(dueDate),
 		createdAt:   now,
 		updatedAt:   now,
 		version:     1,
@@ -94,7 +108,7 @@ func NewTask(
 		Title:       title,
 		Description: description,
 		Priority:    priority,
-		DueDate:     dueDate,
+		DueDate:     clonePtr(dueDate),
 	}}
 
 	return task, nil
@@ -131,10 +145,10 @@ func ReconstituteTask(s TaskSnapshot) (*Task, error) {
 		description: s.Description,
 		status:      s.Status,
 		priority:    s.Priority,
-		dueDate:     s.DueDate,
+		dueDate:     clonePtr(s.DueDate),
 		createdAt:   s.CreatedAt,
 		updatedAt:   s.UpdatedAt,
-		completedAt: s.CompletedAt,
+		completedAt: clonePtr(s.CompletedAt),
 		version:     s.Version,
 	}, nil
 }
@@ -148,10 +162,10 @@ func (t *Task) Snapshot() TaskSnapshot {
 		Description: t.description,
 		Status:      t.status,
 		Priority:    t.priority,
-		DueDate:     t.dueDate,
+		DueDate:     clonePtr(t.dueDate),
 		CreatedAt:   t.createdAt,
 		UpdatedAt:   t.updatedAt,
-		CompletedAt: t.completedAt,
+		CompletedAt: clonePtr(t.completedAt),
 		Version:     t.version,
 	}
 }
@@ -306,8 +320,8 @@ func (t *Task) Reschedule(dueDate *DueDate, now time.Time) error {
 		return ErrDueDateInPast
 	}
 
-	t.dueDate = dueDate
-	t.apply(now, TaskRescheduled{eventMeta: t.meta(now), NewDueDate: dueDate})
+	t.dueDate = clonePtr(dueDate)
+	t.apply(now, TaskRescheduled{eventMeta: t.meta(now), NewDueDate: clonePtr(dueDate)})
 
 	return nil
 }
