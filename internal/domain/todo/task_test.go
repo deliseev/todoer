@@ -163,6 +163,24 @@ func TestNewTaskValidation(t *testing.T) {
 	}
 }
 
+func TestNewTaskRejectsStaleDueDate(t *testing.T) {
+	t.Parallel()
+
+	// Срок был корректен в момент своего создания, но к моменту создания
+	// задачи уже прошёл. Reschedule такое отвергает — конструктор обязан
+	// вести себя так же, иначе одно правило соблюдается через раз.
+	args := validTaskArgs(t)
+	args.dueDate = mustDueDate(t, testLater)
+
+	task, err := args.newTask(testMuchLater)
+	if !errors.Is(err, todo.ErrDueDateInPast) {
+		t.Fatalf("NewTask(...) вернул ошибку %v, ожидалась ErrDueDateInPast", err)
+	}
+	if task != nil {
+		t.Error("NewTask(...) при ошибке вернул непустую задачу")
+	}
+}
+
 func TestTaskLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -673,22 +691,60 @@ func TestTaskIsOverdue(t *testing.T) {
 func TestTaskSnapshotRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	original := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
-	if err := original.Start(testLater); err != nil {
-		t.Fatalf("Task.Start(...) вернул ошибку: %v", err)
+	// Круг через хранилище обязан быть безубыточным для любого состояния,
+	// в котором задача может там оказаться, — а не только для того,
+	// про которое вспомнил автор теста.
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, *todo.Task)
+	}{
+		{name: "ожидает выполнения", prepare: func(*testing.T, *todo.Task) {}},
+		{name: "в работе", prepare: startTask},
+		{name: "выполненная", prepare: completeTask},
+		{name: "отменённая", prepare: cancelTask},
 	}
-	original.PullEvents()
 
-	restored, err := todo.ReconstituteTask(original.Snapshot())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			original := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+			tt.prepare(t, original)
+			original.PullEvents()
+
+			restored, err := todo.ReconstituteTask(original.Snapshot())
+			if err != nil {
+				t.Fatalf("ReconstituteTask(...) вернул ошибку: %v", err)
+			}
+
+			assertSameState(t, original, restored)
+
+			// Восстановление из хранилища — не событие доменной жизни.
+			if events := restored.PullEvents(); len(events) != 0 {
+				t.Errorf("восстановленная задача несёт события %v, ожидалось ни одного", eventNames(events))
+			}
+		})
+	}
+}
+
+func TestReconstituteTaskKeepsStaleDueDate(t *testing.T) {
+	t.Parallel()
+
+	// Инварианты создания к восстановлению не применяются: задача с давно
+	// просроченным сроком законно лежит в хранилище и обязана оттуда подняться.
+	task := newTestTaskWithDueDate(t, mustDueDate(t, testLater))
+	snapshot := task.Snapshot()
+	snapshot.UpdatedAt = testTomorrowAt
+
+	restored, err := todo.ReconstituteTask(snapshot)
 	if err != nil {
 		t.Fatalf("ReconstituteTask(...) вернул ошибку: %v", err)
 	}
-
-	assertSameState(t, original, restored)
-
-	// Восстановление из хранилища — не событие доменной жизни.
-	if events := restored.PullEvents(); len(events) != 0 {
-		t.Errorf("восстановленная задача несёт события %v, ожидалось ни одного", eventNames(events))
+	if _, ok := restored.DueDate(); !ok {
+		t.Error("восстановленная задача потеряла просроченный срок")
+	}
+	if !restored.IsOverdue(testTomorrowAt) {
+		t.Error("Task.IsOverdue(...) = false, ожидалось true для просроченной задачи")
 	}
 }
 
@@ -744,6 +800,15 @@ func TestReconstituteTaskValidation(t *testing.T) {
 				t.Error("ReconstituteTask(...) при ошибке вернул непустую задачу")
 			}
 		})
+	}
+}
+
+// startTask берёт задачу в работу в момент testLater.
+func startTask(t *testing.T, task *todo.Task) {
+	t.Helper()
+
+	if err := task.Start(testLater); err != nil {
+		t.Fatalf("Task.Start(...) вернул ошибку: %v", err)
 	}
 }
 

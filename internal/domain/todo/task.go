@@ -55,70 +55,88 @@ func NewTask(
 	dueDate *DueDate,
 	now time.Time,
 ) (*Task, error) {
-	id, err := ParseTaskID(id.value)
-	if err != nil {
-		return nil, err
+	// Значимые объекты валидны по построению — перепроверять их содержимое
+	// незачем. Убедиться нужно ровно в одном: что вместо объекта не передали
+	// нулевое значение, мимо фабрики.
+	if id.IsZero() {
+		return nil, ErrInvalidTaskID
 	}
-	ownerID, err = ParseOwnerID(ownerID.value)
-	if err != nil {
-		return nil, err
+	if ownerID.IsZero() {
+		return nil, ErrInvalidOwnerID
 	}
-	title, err = NewTitle(title.value)
-	if err != nil {
-		return nil, err
+	if title.IsZero() {
+		return nil, ErrEmptyTitle
 	}
-	priority, err = ParsePriority(priority.String())
-	if err != nil {
-		return nil, err
+	if !priority.IsValid() {
+		return nil, ErrUnknownPriority
 	}
-	return &Task{
+	// Срок мог протухнуть между своим созданием и созданием задачи —
+	// то же правило, что и в Reschedule.
+	if dueDate != nil && !dueDate.Time().After(now) {
+		return nil, ErrDueDateInPast
+	}
+
+	task := &Task{
 		id:          id,
 		ownerID:     ownerID,
 		title:       title,
 		description: description,
+		status:      StatusPending,
 		priority:    priority,
 		dueDate:     dueDate,
 		createdAt:   now,
 		updatedAt:   now,
 		version:     1,
-		events: []DomainEvent{TaskCreated{
-			eventMeta: eventMeta{
-				taskID: id,
-				at:     now,
-			},
-			OwnerID:     ownerID,
-			Title:       title,
-			Description: description,
-			Priority:    priority,
-			DueDate:     dueDate,
-		}},
-	}, nil
+	}
+	task.events = []DomainEvent{TaskCreated{
+		eventMeta:   task.meta(now),
+		OwnerID:     ownerID,
+		Title:       title,
+		Description: description,
+		Priority:    priority,
+		DueDate:     dueDate,
+	}}
+
+	return task, nil
 }
 
 // ReconstituteTask восстанавливает задачу из снимка, не порождая событий:
 // поднятие из хранилища — не факт доменной жизни, а технический шаг.
+//
+// Инварианты создания здесь намеренно не применяются. Задача с давно
+// просроченным сроком законно лежит в хранилище, и отказать ей в подъёме
+// значило бы запереть её там навсегда. Проверяется только то, что снимок
+// вообще описывает задачу.
 func ReconstituteTask(s TaskSnapshot) (*Task, error) {
-	task, err := NewTask(
-		s.ID,
-		s.OwnerID,
-		s.Title,
-		s.Description,
-		s.Priority,
-		s.DueDate,
-		s.CreatedAt,
-	)
-	if err != nil {
-		return nil, err
+	if s.ID.IsZero() {
+		return nil, ErrInvalidTaskID
+	}
+	if s.OwnerID.IsZero() {
+		return nil, ErrInvalidOwnerID
+	}
+	if s.Title.IsZero() {
+		return nil, ErrEmptyTitle
 	}
 	if !s.Status.IsValid() {
 		return nil, ErrUnknownStatus
 	}
-	task.status = s.Status
-	task.version = s.Version
-	task.updatedAt = s.UpdatedAt
-	task.createdAt = s.CreatedAt
-	task.events = make([]DomainEvent, 0)
-	return task, nil
+	if !s.Priority.IsValid() {
+		return nil, ErrUnknownPriority
+	}
+
+	return &Task{
+		id:          s.ID,
+		ownerID:     s.OwnerID,
+		title:       s.Title,
+		description: s.Description,
+		status:      s.Status,
+		priority:    s.Priority,
+		dueDate:     s.DueDate,
+		createdAt:   s.CreatedAt,
+		updatedAt:   s.UpdatedAt,
+		completedAt: s.CompletedAt,
+		version:     s.Version,
+	}, nil
 }
 
 // Snapshot возвращает плоское представление текущего состояния задачи.
