@@ -553,6 +553,46 @@ func TestTaskMutationsOnTerminalTask(t *testing.T) {
 	}
 }
 
+func TestTaskMutationsReportDeliveryFailure(t *testing.T) {
+	for _, m := range taskMutations() {
+		t.Run(m.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+			publishErr := errors.New("шина недоступна")
+			env.publisher.err = publishErr
+
+			err := m.run(t.Context(), env.service, task.ID().String(), testOwner)
+			if !errors.Is(err, app.ErrEventDeliveryFailed) {
+				t.Fatalf("ожидалась ErrEventDeliveryFailed, получено: %v", err)
+			}
+			if !errors.Is(err, publishErr) {
+				t.Errorf("отказ публикатора не сохранён в ошибке: %v", err)
+			}
+
+			var deliveryErr *app.EventDeliveryError
+			if !errors.As(err, &deliveryErr) {
+				t.Fatalf("ошибка не несёт недоставленные события: %v", err)
+			}
+			if deliveryErr.TaskID != task.ID() {
+				t.Errorf("ошибка о задаче %s, ожидалась %s", deliveryErr.TaskID, task.ID())
+			}
+			if got := eventNames(deliveryErr.Events); len(got) != 1 || got[0] != m.event {
+				t.Errorf("не доставлены события %v, ожидалось [%s]", got, m.event)
+			}
+
+			// Изменение при этом состоялось: недоставленное событие описывает
+			// то, что уже лежит в хранилище, а не то, что откатилось.
+			snapshot, ok := env.repo.stored(task.ID())
+			if !ok {
+				t.Fatal("задача исчезла из хранилища")
+			}
+			if snapshot.Version != task.Version()+1 {
+				t.Errorf("версия = %d, ожидалась %d", snapshot.Version, task.Version()+1)
+			}
+		})
+	}
+}
+
 func TestTaskMutationsReportVersionConflict(t *testing.T) {
 	for _, m := range taskMutations() {
 		t.Run(m.name, func(t *testing.T) {
