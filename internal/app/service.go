@@ -215,7 +215,14 @@ func (s *TaskService) publish(ctx context.Context, taskID todo.TaskID, events []
 	if len(events) == 0 {
 		return nil
 	}
-	if err := s.publisher.Publish(ctx, events); err != nil {
+	// Отмена запроса доставку не отменяет: задача уже записана, и рассказать
+	// о ней обязаны независимо от того, ждёт ли ещё ответа тот, кто её
+	// заказал. WithoutCancel убирает только отмену и срок, оставляя значения
+	// контекста — трассировку и всё, что по нему передают.
+	//
+	// Собственный срок на доставку — забота реализации: сценарий не знает,
+	// сколько она стоит, и вешать сюда произвольный таймаут не станет.
+	if err := s.publisher.Publish(context.WithoutCancel(ctx), events); err != nil {
 		return &EventDeliveryError{TaskID: taskID, Events: events, Err: err}
 	}
 	return nil

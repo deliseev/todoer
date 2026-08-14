@@ -36,7 +36,13 @@ func newFakeRepository() *fakeRepository {
 }
 
 // Get поднимает задачу из памяти.
-func (r *fakeRepository) Get(_ context.Context, id todo.TaskID) (*todo.Task, error) {
+func (r *fakeRepository) Get(ctx context.Context, id todo.TaskID) (*todo.Task, error) {
+	// Настоящее хранилище отменённый запрос не обслуживает, и фейк, который
+	// обслуживал бы, разрешал бы сценарию работать после отмены незаметно.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -52,7 +58,13 @@ func (r *fakeRepository) Get(_ context.Context, id todo.TaskID) (*todo.Task, err
 }
 
 // Save записывает задачу, соблюдая оптимистичную блокировку по версии.
-func (r *fakeRepository) Save(_ context.Context, task *todo.Task) error {
+func (r *fakeRepository) Save(ctx context.Context, task *todo.Task) error {
+	// Контекст проверяется до хука: хук изображает отмену, случившуюся уже
+	// после того, как хранилище приняло запись.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if r.beforeSave != nil {
 		hook := r.beforeSave
 		r.beforeSave = nil
@@ -113,14 +125,18 @@ type recordingPublisher struct {
 	// sawEmpty отмечает публикацию пустой партии: успешная мутация всегда
 	// порождает событие, поэтому дёргать публикатор впустую сценарию незачем.
 	sawEmpty bool
+	// ctxErr — состояние контекста на момент вызова. Сам контекст в поле
+	// не кладём: он живёт ровно столько, сколько вызов.
+	ctxErr error
 }
 
 // Publish запоминает партию событий.
-func (p *recordingPublisher) Publish(_ context.Context, events []todo.DomainEvent) error {
+func (p *recordingPublisher) Publish(ctx context.Context, events []todo.DomainEvent) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.calls++
+	p.ctxErr = ctx.Err()
 	if len(events) == 0 {
 		p.sawEmpty = true
 	}

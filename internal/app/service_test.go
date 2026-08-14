@@ -617,6 +617,65 @@ func TestTaskMutationsReportVersionConflict(t *testing.T) {
 	}
 }
 
+func TestTaskMutationsSurviveRequestCancellation(t *testing.T) {
+	for _, m := range taskMutations() {
+		t.Run(m.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			// Клиент отвалился ровно в момент записи: задача сохранится,
+			// а вот событие о ней уйти уже «не успевает».
+			env.repo.beforeSave = cancel
+
+			if err := m.run(ctx, env.service, task.ID().String(), testOwner); err != nil {
+				t.Fatalf("%s(...) вернул ошибку: %v", m.name, err)
+			}
+
+			// Отмена запроса не отменяет доставки: изменение состоялось,
+			// и рассказать о нём обязаны независимо от того, ждёт ли ответа
+			// тот, кто его заказал.
+			if env.publisher.calls != 1 {
+				t.Fatalf("публикатор вызван %d раз, ожидался 1", env.publisher.calls)
+			}
+			if env.publisher.ctxErr != nil {
+				t.Errorf("публикатор получил отменённый контекст: %v", env.publisher.ctxErr)
+			}
+			if got := env.publisher.published(); len(got) != 1 || got[0] != m.event {
+				t.Errorf("опубликованы события %v, ожидалось [%s]", got, m.event)
+			}
+		})
+	}
+}
+
+func TestTaskMutationsRejectCancelledRequest(t *testing.T) {
+	for _, m := range taskMutations() {
+		t.Run(m.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			// До записи отмена законна и должна останавливать работу:
+			// хранилище обязано отказать, а сценарий — не сделать вид,
+			// будто ничего не просили.
+			err := m.run(ctx, env.service, task.ID().String(), testOwner)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("ожидалась context.Canceled, получено: %v", err)
+			}
+			if env.repo.saveCount() != 0 {
+				t.Error("отменённый запрос дошёл до записи")
+			}
+			if env.publisher.calls != 0 {
+				t.Error("отменённый запрос породил публикацию")
+			}
+		})
+	}
+}
+
 func TestRenameTask(t *testing.T) {
 	t.Run("заголовок нормализуется", func(t *testing.T) {
 		env := newTestEnv(t)
