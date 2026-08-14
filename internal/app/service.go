@@ -24,13 +24,13 @@ type TaskService struct {
 // nil-публикатор вместо NopPublisher — тихо потерять события.
 func NewTaskService(repo Repository, publisher EventPublisher, clock Clock) (*TaskService, error) {
 	if repo == nil {
-		return nil, fmt.Errorf("%w: хранилище задач", ErrMissingDependency)
+		return nil, fmt.Errorf("app: build task service (task repository): %w", ErrMissingDependency)
 	}
 	if publisher == nil {
-		return nil, fmt.Errorf("%w: публикатор событий", ErrMissingDependency)
+		return nil, fmt.Errorf("app: build task service (event publisher): %w", ErrMissingDependency)
 	}
 	if clock == nil {
-		return nil, fmt.Errorf("%w: часы", ErrMissingDependency)
+		return nil, fmt.Errorf("app: build task service (clock): %w", ErrMissingDependency)
 	}
 
 	return &TaskService{repo: repo, publisher: publisher, clock: clock}, nil
@@ -191,7 +191,7 @@ func (s *TaskService) mutate(
 	// Причина остаётся в тексте — для человека, читающего лог, а не для
 	// errors.Is.
 	if task.OwnerID() != owner {
-		return fmt.Errorf("%w: задача %s принадлежит другому владельцу", ErrTaskNotFound, id)
+		return fmt.Errorf("app: task %s belongs to another owner: %w", id, ErrTaskNotFound)
 	}
 
 	// Доменная ошибка обогащается идентификатором задачи: сентинель говорит,
@@ -199,7 +199,7 @@ func (s *TaskService) mutate(
 	// разъедется с именем метода при первом же переименовании, а
 	// errors.Is-контракт от обёртки не меняется.
 	if err := mutate(task, s.clock.Now()); err != nil {
-		return fmt.Errorf("app: изменить задачу %s: %w", id, err)
+		return fmt.Errorf("app: mutate task %s: %w", id, err)
 	}
 
 	// Версия подъёма едет обратно нетронутой: сценарий её не вычисляет,

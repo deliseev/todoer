@@ -25,7 +25,7 @@ type TaskID struct {
 func NewTaskID() (TaskID, error) {
 	var buf [taskIDBytes]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return TaskID{}, fmt.Errorf("todo: сгенерировать идентификатор задачи: %w", err)
+		return TaskID{}, fmt.Errorf("todo: generate task id: %w", err)
 	}
 	return TaskID{value: hex.EncodeToString(buf[:])}, nil
 }
@@ -36,10 +36,13 @@ func ParseTaskID(s string) (TaskID, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 
 	if len(s) != TaskIDLength {
-		return TaskID{}, fmt.Errorf("%w: длина %d, ожидалось %d", ErrInvalidTaskID, len(s), TaskIDLength)
+		return TaskID{}, fmt.Errorf("todo: parse task id (length %d, want %d): %w",
+			len(s), TaskIDLength, ErrInvalidTaskID)
 	}
 	if _, err := hex.DecodeString(s); err != nil {
-		return TaskID{}, fmt.Errorf("%w: %w", ErrInvalidTaskID, err)
+		// Две причины сразу: сентинель классифицирует отказ, ошибка hex
+		// объясняет его подробно.
+		return TaskID{}, fmt.Errorf("todo: parse task id: %w: %w", ErrInvalidTaskID, err)
 	}
 
 	return TaskID{value: s}, nil

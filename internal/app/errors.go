@@ -57,7 +57,7 @@ type EventDeliveryError struct {
 
 // Error описывает отказ доставки.
 func (e *EventDeliveryError) Error() string {
-	return fmt.Sprintf("app: события задачи %s не доставлены (%d шт.): %v",
+	return fmt.Sprintf("app: deliver events of task %s (%d events): %v",
 		e.TaskID, len(e.Events), e.Err)
 }
 

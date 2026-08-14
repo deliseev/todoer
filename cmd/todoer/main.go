@@ -43,7 +43,7 @@ func newTaskService() (*app.TaskService, error) {
 func run(ctx context.Context, out io.Writer) error {
 	service, err := newTaskService()
 	if err != nil {
-		return fmt.Errorf("собрать сервис: %w", err)
+		return fmt.Errorf("build task service: %w", err)
 	}
 
 	const owner = "user-42"
@@ -57,7 +57,7 @@ func run(ctx context.Context, out io.Writer) error {
 		DueDate:     &dueDate,
 	})
 	if err != nil {
-		return fmt.Errorf("создать задачу: %w", err)
+		return fmt.Errorf("create task: %w", err)
 	}
 	fmt.Fprintf(out, "задача создана: %s\n", taskID)
 
@@ -65,7 +65,7 @@ func run(ctx context.Context, out io.Writer) error {
 		TaskID:  taskID.String(),
 		OwnerID: owner,
 	}); err != nil {
-		return fmt.Errorf("взять задачу в работу: %w", err)
+		return fmt.Errorf("start task: %w", err)
 	}
 	fmt.Fprintln(out, "задача в работе")
 
@@ -73,7 +73,7 @@ func run(ctx context.Context, out io.Writer) error {
 		TaskID:  taskID.String(),
 		OwnerID: owner,
 	}); err != nil {
-		return fmt.Errorf("выполнить задачу: %w", err)
+		return fmt.Errorf("complete task: %w", err)
 	}
 	fmt.Fprintln(out, "задача выполнена")
 

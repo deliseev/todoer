@@ -86,7 +86,7 @@ func (r *fakeRepository) Get(ctx context.Context, id todo.TaskID) (*todo.Task, i
 
 	snapshot, ok := r.tasks[id.String()]
 	if !ok {
-		return nil, 0, fmt.Errorf("%w: %s", app.ErrTaskNotFound, id)
+		return nil, 0, fmt.Errorf("fake: get task %s: %w", id, app.ErrTaskNotFound)
 	}
 
 	task, err := todo.ReconstituteTask(snapshot)
@@ -123,14 +123,14 @@ func (r *fakeRepository) Save(ctx context.Context, task *todo.Task, loadedVersio
 
 	switch {
 	case ok && stored.Version != loadedVersion:
-		return fmt.Errorf("%w: задачу подняли версией %d, сохранена версия %d",
-			app.ErrVersionConflict, loadedVersion, stored.Version)
+		return fmt.Errorf("fake: save task %s (loaded version %d, stored version %d): %w",
+			snapshot.ID, loadedVersion, stored.Version, app.ErrVersionConflict)
 	case !ok && loadedVersion != 0:
-		return fmt.Errorf("%w: задача %s поднята версией %d, но в хранилище её нет",
-			app.ErrVersionConflict, snapshot.ID, loadedVersion)
+		return fmt.Errorf("fake: save task %s (loaded version %d, not stored anymore): %w",
+			snapshot.ID, loadedVersion, app.ErrVersionConflict)
 	case ok && loadedVersion == 0:
-		return fmt.Errorf("%w: задача %s уже сохранена версией %d",
-			app.ErrVersionConflict, snapshot.ID, stored.Version)
+		return fmt.Errorf("fake: insert task %s (already stored at version %d): %w",
+			snapshot.ID, stored.Version, app.ErrVersionConflict)
 	}
 
 	r.tasks[snapshot.ID.String()] = snapshot

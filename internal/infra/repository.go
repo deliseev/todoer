@@ -50,14 +50,14 @@ func (r *InMemoryTaskRepository) Get(ctx context.Context, taskID todo.TaskID) (*
 
 	snapshot, ok := r.snapshot(taskID)
 	if !ok {
-		return nil, 0, fmt.Errorf("%w: задача %s", app.ErrTaskNotFound, taskID)
+		return nil, 0, fmt.Errorf("infra: get task %s: %w", taskID, app.ErrTaskNotFound)
 	}
 
 	// Восстановление идёт уже без блокировки: снимок скопирован, а работа
 	// домена хранилища не касается.
 	task, err := todo.ReconstituteTask(snapshot)
 	if err != nil {
-		return nil, 0, fmt.Errorf("infra: восстановить задачу %s: %w", taskID, err)
+		return nil, 0, fmt.Errorf("infra: reconstitute task %s: %w", taskID, err)
 	}
 
 	return task, snapshot.Version, nil
@@ -84,16 +84,16 @@ func (r *InMemoryTaskRepository) Save(ctx context.Context, task *todo.Task, load
 
 	switch {
 	case ok && stored.Version != loadedVersion:
-		return fmt.Errorf("%w: задачу подняли версией %d, сохранена версия %d",
-			app.ErrVersionConflict, loadedVersion, stored.Version)
+		return fmt.Errorf("infra: save task %s (loaded version %d, stored version %d): %w",
+			task.ID(), loadedVersion, stored.Version, app.ErrVersionConflict)
 	case !ok && loadedVersion != 0:
 		// Задачу поднимали из хранилища, а сейчас её там нет.
-		return fmt.Errorf("%w: задача %s поднята версией %d, но в хранилище её нет",
-			app.ErrVersionConflict, task.ID(), loadedVersion)
+		return fmt.Errorf("infra: save task %s (loaded version %d, not stored anymore): %w",
+			task.ID(), loadedVersion, app.ErrVersionConflict)
 	case ok && loadedVersion == 0:
 		// Писатель считает задачу новой, а место уже занято.
-		return fmt.Errorf("%w: задача %s уже сохранена версией %d",
-			app.ErrVersionConflict, task.ID(), stored.Version)
+		return fmt.Errorf("infra: insert task %s (already stored at version %d): %w",
+			task.ID(), stored.Version, app.ErrVersionConflict)
 	}
 
 	r.snapshots[task.ID()] = task.Snapshot()
