@@ -201,10 +201,17 @@ func TestCreateTask(t *testing.T) {
 
 	t.Run("несохранённая задача событий не порождает", func(t *testing.T) {
 		env := newTestEnv(t)
-		env.repo.saveErr = errors.New("хранилище недоступно")
+		saveErr := errors.New("хранилище недоступно")
+		env.repo.saveErr = saveErr
 
-		if _, err := env.service.CreateTask(t.Context(), validCommand()); err == nil {
-			t.Fatal("CreateTask(...) не вернул ошибку хранилища")
+		_, err := env.service.CreateTask(t.Context(), validCommand())
+		if !errors.Is(err, saveErr) {
+			t.Fatalf("ожидалась ошибка хранилища, получено: %v", err)
+		}
+		// Отказ записи и отказ доставки — разные беды с разными последствиями,
+		// и вызывающий обязан их различать: здесь задачи нет вовсе.
+		if errors.Is(err, app.ErrEventDeliveryFailed) {
+			t.Error("отказ хранилища выдан за отказ доставки")
 		}
 		if env.publisher.calls != 0 {
 			t.Errorf("публикатор вызван %d раз, ожидалось 0", env.publisher.calls)
@@ -219,6 +226,11 @@ func TestCreateTask(t *testing.T) {
 		id, err := env.service.CreateTask(t.Context(), validCommand())
 		if !errors.Is(err, publishErr) {
 			t.Fatalf("ожидалась ошибка публикации, получено: %v", err)
+		}
+		// Отказ доставки помечен сентинелью: по ней транспорт отличит
+		// «задача не создана» от «создана, но событие не ушло».
+		if !errors.Is(err, app.ErrEventDeliveryFailed) {
+			t.Errorf("ошибка не помечена ErrEventDeliveryFailed: %v", err)
 		}
 		// Задача при этом уже сохранена: отказ доставки не отменяет записи.
 		if _, ok := env.repo.stored(id); !ok {

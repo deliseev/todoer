@@ -22,6 +22,14 @@ var (
 	// задачи с тем, кто её меняет, — работа сценария.
 	ErrForbidden = errors.New("app: task belongs to another owner")
 
+	// ErrEventDeliveryFailed — задача записана, но события не ушли.
+	//
+	// Отличать эту беду от отказа записи обязан вызывающий: в первом случае
+	// изменение состоялось и видно всем, кто прочтёт задачу, во втором —
+	// не произошло ничего. Для транспорта это разные ответы, поэтому
+	// текстом ошибки различие оставлять нельзя.
+	ErrEventDeliveryFailed = errors.New("app: task events were not delivered")
+
 	// ErrMissingDependency — сервис собран без обязательной зависимости.
 	ErrMissingDependency = errors.New("app: missing dependency")
 )

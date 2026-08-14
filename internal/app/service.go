@@ -198,12 +198,16 @@ func (s *TaskService) mutate(
 
 // publish отдаёт события публикатору. Неуспешная операция событий не
 // порождает, поэтому пустая партия до порта не доходит.
+//
+// Отказ доставки помечается ErrEventDeliveryFailed: к этому моменту задача
+// уже записана, и вызывающему нужно отличать «изменения нет» от «изменение
+// состоялось, но о нём не узнали».
 func (s *TaskService) publish(ctx context.Context, events []todo.DomainEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
 	if err := s.publisher.Publish(ctx, events); err != nil {
-		return fmt.Errorf("app: опубликовать события задачи: %w", err)
+		return fmt.Errorf("%w: %w", ErrEventDeliveryFailed, err)
 	}
 	return nil
 }
