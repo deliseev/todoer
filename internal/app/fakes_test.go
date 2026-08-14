@@ -35,39 +35,76 @@ func newFakeRepository() *fakeRepository {
 	return &fakeRepository{tasks: make(map[string]todo.TaskSnapshot)}
 }
 
+// failGet заставляет хранилище отказывать на чтении.
+func (r *fakeRepository) failGet(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.getErr = err
+}
+
+// failSave заставляет хранилище отказывать на записи.
+func (r *fakeRepository) failSave(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.saveErr = err
+}
+
+// onBeforeSave вешает однократный хук, срабатывающий перед записью.
+func (r *fakeRepository) onBeforeSave(hook func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.beforeSave = hook
+}
+
+// takeBeforeSave забирает хук, оставляя место пустым: он однократный.
+func (r *fakeRepository) takeBeforeSave() func() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	hook := r.beforeSave
+	r.beforeSave = nil
+	return hook
+}
+
 // Get поднимает задачу из памяти.
-func (r *fakeRepository) Get(ctx context.Context, id todo.TaskID) (*todo.Task, error) {
+func (r *fakeRepository) Get(ctx context.Context, id todo.TaskID) (*todo.Task, int, error) {
 	// Настоящее хранилище отменённый запрос не обслуживает, и фейк, который
 	// обслуживал бы, разрешал бы сценарию работать после отмены незаметно.
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.getErr != nil {
-		return nil, r.getErr
+		return nil, 0, r.getErr
 	}
 
 	snapshot, ok := r.tasks[id.String()]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", app.ErrTaskNotFound, id)
+		return nil, 0, fmt.Errorf("%w: %s", app.ErrTaskNotFound, id)
 	}
-	return todo.ReconstituteTask(snapshot)
+
+	task, err := todo.ReconstituteTask(snapshot)
+	if err != nil {
+		return nil, 0, err
+	}
+	return task, snapshot.Version, nil
 }
 
 // Save записывает задачу, соблюдая оптимистичную блокировку по версии.
-func (r *fakeRepository) Save(ctx context.Context, task *todo.Task) error {
+func (r *fakeRepository) Save(ctx context.Context, task *todo.Task, loadedVersion int) error {
 	// Контекст проверяется до хука: хук изображает отмену, случившуюся уже
 	// после того, как хранилище приняло запись.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	if r.beforeSave != nil {
-		hook := r.beforeSave
-		r.beforeSave = nil
+	if hook := r.takeBeforeSave(); hook != nil {
 		hook()
 	}
 
@@ -78,12 +115,22 @@ func (r *fakeRepository) Save(ctx context.Context, task *todo.Task) error {
 		return r.saveErr
 	}
 
-	// То же правило, что у настоящего хранилища: обновление принимается
-	// только следующей версией.
+	// То же правило, что у настоящего хранилища: сверяемся с версией, которой
+	// задачу подняли. Копировать сюда упрощённое правило нельзя — двойник
+	// перестанет ловить то, на чём споткнётся оригинал.
 	snapshot := task.Snapshot()
-	if stored, ok := r.tasks[snapshot.ID.String()]; ok && stored.Version+1 != snapshot.Version {
-		return fmt.Errorf("%w: сохранена версия %d, записывается %d",
-			app.ErrVersionConflict, stored.Version, snapshot.Version)
+	stored, ok := r.tasks[snapshot.ID.String()]
+
+	switch {
+	case ok && stored.Version != loadedVersion:
+		return fmt.Errorf("%w: задачу подняли версией %d, сохранена версия %d",
+			app.ErrVersionConflict, loadedVersion, stored.Version)
+	case !ok && loadedVersion != 0:
+		return fmt.Errorf("%w: задача %s поднята версией %d, но в хранилище её нет",
+			app.ErrVersionConflict, snapshot.ID, loadedVersion)
+	case ok && loadedVersion == 0:
+		return fmt.Errorf("%w: задача %s уже сохранена версией %d",
+			app.ErrVersionConflict, snapshot.ID, stored.Version)
 	}
 
 	r.tasks[snapshot.ID.String()] = snapshot
@@ -147,12 +194,52 @@ func (p *recordingPublisher) Publish(ctx context.Context, events []todo.DomainEv
 	return p.err
 }
 
+// failWith заставляет публикатор отказывать.
+func (p *recordingPublisher) failWith(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.err = err
+}
+
 // published возвращает имена опубликованных событий в порядке публикации.
 func (p *recordingPublisher) published() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	return eventNames(p.events)
+}
+
+// eventAt возвращает опубликованное событие по его порядковому номеру.
+func (p *recordingPublisher) eventAt(i int) todo.DomainEvent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.events[i]
+}
+
+// callCount возвращает число обращений к публикатору.
+func (p *recordingPublisher) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.calls
+}
+
+// contextErr возвращает состояние контекста на момент последнего вызова.
+func (p *recordingPublisher) contextErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.ctxErr
+}
+
+// sawEmptyBatch сообщает, что публикатор хотя бы раз получил пустую партию.
+func (p *recordingPublisher) sawEmptyBatch() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.sawEmpty
 }
 
 // stubClock — управляемые часы. Тесты двигают их вручную, поэтому «сейчас»

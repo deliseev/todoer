@@ -73,7 +73,9 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 		return todo.TaskID{}, err
 	}
 
-	if err := s.repo.Save(ctx, task); err != nil {
+	// Нулевая версия подъёма: задача только что создана и в хранилище
+	// ещё не бывала.
+	if err := s.repo.Save(ctx, task, 0); err != nil {
 		return todo.TaskID{}, err
 	}
 
@@ -125,8 +127,10 @@ func (s *TaskService) ChangePriority(ctx context.Context, cmd ChangePriorityComm
 // Nil в команде снимает срок.
 func (s *TaskService) RescheduleTask(ctx context.Context, cmd RescheduleTaskCommand) error {
 	return s.mutate(ctx, cmd.TaskID, cmd.OwnerID, func(task *todo.Task, now time.Time) error {
-		// Срок разбирается внутри мутатора: он проверяется относительно того
-		// же «сейчас», с которым его увидит домен.
+		// Единственный сценарий, разбирающий своё поле внутри мутатора, а не
+		// до него: срок обязан проверяться относительно того же «сейчас»,
+		// с которым его увидит домен. Плата — лишний поход в хранилище,
+		// когда срок заведомо негоден; она сознательная.
 		dueDate, err := parseDueDate(cmd.DueDate, now)
 		if err != nil {
 			return err
@@ -177,7 +181,7 @@ func (s *TaskService) mutate(
 		return err
 	}
 
-	task, err := s.repo.Get(ctx, id)
+	task, loadedVersion, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -190,11 +194,17 @@ func (s *TaskService) mutate(
 		return fmt.Errorf("%w: задача %s принадлежит другому владельцу", ErrTaskNotFound, id)
 	}
 
+	// Доменная ошибка обогащается идентификатором задачи: сентинель говорит,
+	// что случилось, но не с чем. Имя сценария в текст не тащим — строка
+	// разъедется с именем метода при первом же переименовании, а
+	// errors.Is-контракт от обёртки не меняется.
 	if err := mutate(task, s.clock.Now()); err != nil {
-		return err
+		return fmt.Errorf("app: изменить задачу %s: %w", id, err)
 	}
 
-	if err := s.repo.Save(ctx, task); err != nil {
+	// Версия подъёма едет обратно нетронутой: сценарий её не вычисляет,
+	// иначе оптимистичная блокировка зависела бы от его аккуратности.
+	if err := s.repo.Save(ctx, task, loadedVersion); err != nil {
 		return err
 	}
 
