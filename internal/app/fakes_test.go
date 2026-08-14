@@ -78,9 +78,11 @@ func (r *fakeRepository) Save(ctx context.Context, task *todo.Task) error {
 		return r.saveErr
 	}
 
+	// То же правило, что у настоящего хранилища: обновление принимается
+	// только следующей версией.
 	snapshot := task.Snapshot()
-	if stored, ok := r.tasks[snapshot.ID.String()]; ok && stored.Version >= snapshot.Version {
-		return fmt.Errorf("%w: сохранено %d, записывается %d",
+	if stored, ok := r.tasks[snapshot.ID.String()]; ok && stored.Version+1 != snapshot.Version {
+		return fmt.Errorf("%w: сохранена версия %d, записывается %d",
 			app.ErrVersionConflict, stored.Version, snapshot.Version)
 	}
 
