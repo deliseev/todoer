@@ -109,7 +109,7 @@ func TestNewDueDateComparesInstants(t *testing.T) {
 
 	msk := time.FixedZone("MSK", 3*60*60)
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	// time.Now несёт монотонные часы — так его вернёт SystemClock в бою.
+	// time.Now несёт монотонные часы — таким «сейчас» и придёт в домен в бою.
 	monotonic := time.Now()
 
 	// Во всех случаях срок совпадает с now с точностью до наносекунды,

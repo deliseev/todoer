@@ -1,20 +1,21 @@
-package todo_test
+package infra_test
 
 import (
 	"testing"
 	"time"
 
-	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/app"
+	"github.com/deliseev/todoer/internal/infra"
 )
 
-// Системные часы обязаны удовлетворять порту Clock.
-var _ todo.Clock = todo.SystemClock{}
+// Системные часы обязаны удовлетворять порту app.Clock.
+var _ app.Clock = infra.SystemClock{}
 
 func TestSystemClockNow(t *testing.T) {
 	t.Parallel()
 
 	before := time.Now()
-	got := todo.SystemClock{}.Now()
+	got := infra.SystemClock{}.Now()
 	after := time.Now()
 
 	if got.Before(before) || got.After(after) {
