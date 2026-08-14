@@ -418,9 +418,13 @@ func TestTaskMutationsRejectForeignOwner(t *testing.T) {
 			env := newTestEnv(t)
 			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
 
+			// Для постороннего чужой задачи не существует, и отличаться от
+			// по-настоящему несуществующей она не должна ничем, что можно
+			// проверить программой: иначе перебор идентификаторов
+			// рассказывает, какие из них заняты.
 			err := m.run(t.Context(), env.service, task.ID().String(), otherOwner)
-			if !errors.Is(err, app.ErrForbidden) {
-				t.Fatalf("ожидалась ErrForbidden, получено: %v", err)
+			if !errors.Is(err, app.ErrTaskNotFound) {
+				t.Fatalf("ожидалась ErrTaskNotFound, получено: %v", err)
 			}
 			if env.repo.saveCount() != 0 {
 				t.Error("чужая команда дошла до хранилища")

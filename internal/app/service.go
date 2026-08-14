@@ -181,8 +181,13 @@ func (s *TaskService) mutate(
 	if err != nil {
 		return err
 	}
+	// Для постороннего задачи не существует. Отказ по владельцу намеренно
+	// неотличим от отсутствия задачи: скажи мы «нельзя» вместо «нет»,
+	// и перебор идентификаторов начнёт рассказывать, какие из них заняты.
+	// Причина остаётся в тексте — для человека, читающего лог, а не для
+	// errors.Is.
 	if task.OwnerID() != owner {
-		return fmt.Errorf("%w: задача %s", ErrForbidden, id)
+		return fmt.Errorf("%w: задача %s принадлежит другому владельцу", ErrTaskNotFound, id)
 	}
 
 	if err := mutate(task, s.clock.Now()); err != nil {
