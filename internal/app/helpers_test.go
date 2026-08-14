@@ -87,6 +87,16 @@ func seedTask(t *testing.T, repo *fakeRepository, owner string, status todo.Stat
 	return task
 }
 
+// eventNames раскладывает события в список имён — так порядок и состав
+// читаются в диагностике одной строкой.
+func eventNames(events []todo.DomainEvent) []string {
+	names := make([]string, len(events))
+	for i, e := range events {
+		names[i] = e.EventName()
+	}
+	return names
+}
+
 // mustTitle создаёт заголовок или валит тест.
 func mustTitle(t *testing.T, s string) todo.Title {
 	t.Helper()

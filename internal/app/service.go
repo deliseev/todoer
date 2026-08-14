@@ -79,7 +79,7 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 
 	// Задача уже записана, и отказ доставки этого не отменяет — поэтому
 	// идентификатор возвращается вместе с ошибкой публикации.
-	return id, s.publish(ctx, task.PullEvents())
+	return id, s.publish(ctx, id, task.PullEvents())
 }
 
 // RenameTask меняет заголовок задачи.
@@ -198,21 +198,25 @@ func (s *TaskService) mutate(
 		return err
 	}
 
-	return s.publish(ctx, task.PullEvents())
+	return s.publish(ctx, id, task.PullEvents())
 }
 
 // publish отдаёт события публикатору. Неуспешная операция событий не
 // порождает, поэтому пустая партия до порта не доходит.
 //
-// Отказ доставки помечается ErrEventDeliveryFailed: к этому моменту задача
+// Отказ доставки возвращается как EventDeliveryError: к этому моменту задача
 // уже записана, и вызывающему нужно отличать «изменения нет» от «изменение
-// состоялось, но о нём не узнали».
-func (s *TaskService) publish(ctx context.Context, events []todo.DomainEvent) error {
+// состоялось, но о нём не узнали». Недоставленные события уезжают в ошибке —
+// больше их взять неоткуда, буфер агрегата уже пуст.
+//
+// Повторы и прочая политика доставки — дело реализации EventPublisher,
+// а не сценария: сценарий не знает ни во что публикует, ни сколько это стоит.
+func (s *TaskService) publish(ctx context.Context, taskID todo.TaskID, events []todo.DomainEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
 	if err := s.publisher.Publish(ctx, events); err != nil {
-		return fmt.Errorf("%w: %w", ErrEventDeliveryFailed, err)
+		return &EventDeliveryError{TaskID: taskID, Events: events, Err: err}
 	}
 	return nil
 }

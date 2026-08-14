@@ -232,6 +232,19 @@ func TestCreateTask(t *testing.T) {
 		if !errors.Is(err, app.ErrEventDeliveryFailed) {
 			t.Errorf("ошибка не помечена ErrEventDeliveryFailed: %v", err)
 		}
+
+		// PullEvents уже опустошил буфер агрегата, а сам агрегат сейчас
+		// исчезнет. Не отдай ошибка события наружу — их не осталось бы нигде.
+		var deliveryErr *app.EventDeliveryError
+		if !errors.As(err, &deliveryErr) {
+			t.Fatalf("ошибка не несёт недоставленные события: %v", err)
+		}
+		if deliveryErr.TaskID != id {
+			t.Errorf("ошибка о задаче %s, ожидалась %s", deliveryErr.TaskID, id)
+		}
+		if got := eventNames(deliveryErr.Events); len(got) != 1 || got[0] != todo.EventTaskCreated {
+			t.Errorf("не доставлены события %v, ожидалось [%s]", got, todo.EventTaskCreated)
+		}
 		// Задача при этом уже сохранена: отказ доставки не отменяет записи.
 		if _, ok := env.repo.stored(id); !ok {
 			t.Error("задача не сохранена, хотя Save отработал")

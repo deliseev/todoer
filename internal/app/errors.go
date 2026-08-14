@@ -6,7 +6,12 @@
 // доменное правило здесь не дублируется и не перепроверяется.
 package app
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/deliseev/todoer/internal/domain/todo"
+)
 
 // Сентинельные ошибки слоя сценариев. Вызывающая сторона сверяет их через
 // errors.Is, поэтому обёртки обязаны использовать %w.
@@ -33,3 +38,31 @@ var (
 	// ErrMissingDependency — сервис собран без обязательной зависимости.
 	ErrMissingDependency = errors.New("app: missing dependency")
 )
+
+// EventDeliveryError — отказ доставки уже записанных изменений.
+//
+// Несёт сами события, и это не роскошь: PullEvents опустошает буфер
+// агрегата, а агрегат живёт только внутри сценария. Не отдай ошибка события
+// наружу — они исчезли бы вместе с ним, и повторить доставку было бы нечем.
+// Гарантию «не потерять» это не даёт: она появится вместе с outbox, когда
+// события начнут писаться в одной транзакции с задачей.
+type EventDeliveryError struct {
+	// TaskID — задача, изменения которой уже сохранены.
+	TaskID todo.TaskID
+	// Events — события в порядке возникновения.
+	Events []todo.DomainEvent
+	// Err — отказ, вернувшийся из публикатора.
+	Err error
+}
+
+// Error описывает отказ доставки.
+func (e *EventDeliveryError) Error() string {
+	return fmt.Sprintf("app: события задачи %s не доставлены (%d шт.): %v",
+		e.TaskID, len(e.Events), e.Err)
+}
+
+// Unwrap отдаёт обе причины: сентинель слоя и отказ публикатора, —
+// поэтому errors.Is находит и ErrEventDeliveryFailed, и ошибку реализации.
+func (e *EventDeliveryError) Unwrap() []error {
+	return []error{ErrEventDeliveryFailed, e.Err}
+}

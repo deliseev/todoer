@@ -134,11 +134,7 @@ func (p *recordingPublisher) published() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	names := make([]string, len(p.events))
-	for i, e := range p.events {
-		names[i] = e.EventName()
-	}
-	return names
+	return eventNames(p.events)
 }
 
 // stubClock — управляемые часы. Тесты двигают их вручную, поэтому «сейчас»
