@@ -114,6 +114,55 @@ func TestRequestBodyLimit(t *testing.T) {
 	}
 }
 
+func TestStrictBodyDecoding(t *testing.T) {
+	// Разбор тела строгий, и отказ случается до похода в app. Молчаливо
+	// проглоченное поле — худший из возможных ответов: клиент получает 200
+	// и уверен, что его правка уехала, а она выброшена по дороге.
+	routes := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{"создание", http.MethodPost, "/tasks"},
+		{"изменение", http.MethodPatch, "/tasks/" + testTaskID},
+	}
+
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{
+			// Опечатка в имени поля: без строгости PATCH ответил бы 200
+			// с неизменённым описанием.
+			name: "опечатка в имени поля",
+			body: `{"title":"Купить кефир","descriptoin":"Два литра"}`,
+		},
+		{
+			// Второй документ в теле молча пропадал бы, а клиент считал бы,
+			// что прислал оба.
+			name: "хвост после документа",
+			body: `{"title":"Купить кефир"} {"title":"Купить ряженку"}`,
+		},
+	}
+
+	for _, route := range routes {
+		for _, body := range bodies {
+			t.Run(route.name+"/"+body.name, func(t *testing.T) {
+				service := newFakeService()
+				service.view = testView()
+
+				rec := do(t, newTestServer(t, service), route.method, route.target, body.body)
+
+				requireStatus(t, rec, http.StatusBadRequest)
+				requireJSONContentType(t, rec)
+				if got := service.totalCalls(); got != 0 {
+					t.Errorf("обращений к сценариям %d, ожидалось 0 — негодное тело дошло до app", got)
+				}
+			})
+		}
+	}
+}
+
 func TestCreateTask(t *testing.T) {
 	t.Run("задача создаётся", func(t *testing.T) {
 		service := newFakeService()

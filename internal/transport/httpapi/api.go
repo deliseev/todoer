@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -279,7 +280,17 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	// соединение, чтобы отправитель не досылал остаток в никуда.
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 
-	err := json.NewDecoder(r.Body).Decode(dst)
+	decoder := json.NewDecoder(r.Body)
+	// Неизвестное поле — отказ, а не молчаливый пропуск. Опечатка в имени
+	// иначе отвечает успехом, ничего не изменив, и клиенту неоткуда узнать,
+	// что его правку выбросили по дороге.
+	decoder.DisallowUnknownFields()
+
+	err := decoder.Decode(dst)
+	if err == nil {
+		err = expectEOF(decoder)
+	}
+
 	switch {
 	case err == nil:
 		return true
@@ -292,6 +303,23 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 		writeError(w, http.StatusBadRequest, "malformed request body")
 	}
 	return false
+}
+
+// expectEOF убеждается, что за разобранным документом в теле ничего нет.
+//
+// Тело — один документ, а не поток: второй молча пропал бы, и клиент,
+// приславший два, считал бы принятыми оба. Ошибка чтения отдаётся как есть —
+// в неё может прийти и превышение потолка, а его надо отличить от негодного
+// тела этажом выше.
+func expectEOF(decoder *json.Decoder) error {
+	switch err := decoder.Decode(new(struct{})); {
+	case errors.Is(err, io.EOF):
+		return nil
+	case err != nil:
+		return err
+	default:
+		return errors.New("httpapi: unexpected json document after the first")
+	}
 }
 
 // isTooLarge отличает превышение потолка от прочих бед разбора.
