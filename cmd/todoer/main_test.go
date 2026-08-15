@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"io"
+	"net"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewTaskService(t *testing.T) {
@@ -23,40 +28,165 @@ func TestNewTaskService(t *testing.T) {
 	})
 }
 
+func TestListenAddr(t *testing.T) {
+	// Без t.Parallel: подтесты правят окружение процесса.
+
+	t.Run("по умолчанию", func(t *testing.T) {
+		t.Setenv(addrEnv, "")
+
+		if got := listenAddr(); got != defaultAddr {
+			t.Errorf("listenAddr() = %q, ожидался %q", got, defaultAddr)
+		}
+	})
+
+	t.Run("из окружения", func(t *testing.T) {
+		t.Setenv(addrEnv, " 127.0.0.1:9999 ")
+
+		// Пробелы по краям — след копирования из конфига, а не часть адреса.
+		if got := listenAddr(); got != "127.0.0.1:9999" {
+			t.Errorf("listenAddr() = %q, ожидался %q", got, "127.0.0.1:9999")
+		}
+	})
+}
+
 func TestRun(t *testing.T) {
 	t.Parallel()
 
-	t.Run("задача проходит жизненный цикл целиком", func(t *testing.T) {
+	t.Run("собранное приложение обслуживает запросы", func(t *testing.T) {
 		t.Parallel()
 
-		var out strings.Builder
+		// Проверяется вся сборка целиком: транспорт поверх сценариев поверх
+		// хранилища в памяти. Задача создаётся и тут же читается обратно —
+		// значит слои соединены, а не просто скомпилировались.
+		out := &syncBuffer{}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
 
-		if err := run(t.Context(), &out); err != nil {
+		go func() { done <- run(ctx, out, "127.0.0.1:0") }()
+
+		addr := waitAddr(t, out)
+
+		created := do(t, request(t, http.MethodPost, "http://"+addr+"/tasks",
+			`{"title":"Купить молоко","priority":"high"}`))
+		if created.StatusCode != http.StatusCreated {
+			t.Fatalf("код ответа на создание = %d, ожидался %d", created.StatusCode, http.StatusCreated)
+		}
+
+		location := created.Header.Get("Location")
+		if location == "" {
+			t.Fatal("в ответе на создание нет Location")
+		}
+
+		read := do(t, request(t, http.MethodGet, "http://"+addr+location, ""))
+		if read.StatusCode != http.StatusOK {
+			t.Fatalf("код ответа на чтение = %d, ожидался %d", read.StatusCode, http.StatusOK)
+		}
+
+		// Отмена останавливает сервер, и это штатное завершение, а не отказ.
+		cancel()
+		if err := <-done; err != nil {
 			t.Fatalf("run(...) вернул ошибку: %v", err)
 		}
-
-		for _, want := range []string{"задача создана", "задача в работе", "задача выполнена"} {
-			if !strings.Contains(out.String(), want) {
-				t.Errorf("в выводе нет %q, получено:\n%s", want, out.String())
-			}
+		if !strings.Contains(out.String(), "остановлен") {
+			t.Errorf("сервер не сообщил об остановке:\n%s", out.String())
 		}
 	})
 
-	t.Run("отменённый запрос останавливает работу", func(t *testing.T) {
+	t.Run("занятый адрес — ошибка, а не паника", func(t *testing.T) {
 		t.Parallel()
 
-		var out strings.Builder
+		busy, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen(...) вернул ошибку: %v", err)
+		}
+		defer busy.Close()
 
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
+		var out bytes.Buffer
 
-		// Отмена доходит до сценария через хранилище: сборка настоящая,
-		// поэтому проверяется весь путь, а не поведение подставного порта.
-		if err := run(ctx, &out); !errors.Is(err, context.Canceled) {
-			t.Fatalf("ожидалась context.Canceled, получено: %v", err)
+		if err := run(t.Context(), &out, busy.Addr().String()); err == nil {
+			t.Fatal("run(...) на занятом адресе вернул nil")
 		}
 		if out.Len() != 0 {
-			t.Errorf("отменённый запуск что-то напечатал:\n%s", out.String())
+			t.Errorf("несостоявшийся запуск что-то напечатал:\n%s", out.String())
 		}
 	})
+}
+
+// syncBuffer — вывод, в который пишет сервер, а читает тест.
+//
+// Горутины разные, поэтому обычный bytes.Buffer здесь ловится -race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+// waitAddr дожидается напечатанного адреса и достаёт его.
+//
+// Порт выбирает ядро (:0), и узнать его можно только из вывода — то есть
+// оттуда же, откуда его узнаёт человек, запустивший команду.
+func waitAddr(t *testing.T, out *syncBuffer) string {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, rest, ok := strings.Cut(out.String(), "http://"); ok {
+			if addr, _, ok := strings.Cut(rest, "\n"); ok {
+				return strings.TrimSpace(addr)
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("сервер не напечатал адрес за отведённое время:\n%s", out.String())
+	return ""
+}
+
+// request готовит запрос с заголовком владельца: аутентификации нет, клиент
+// называет себя сам.
+func request(t *testing.T, method, url, body string) *http.Request {
+	t.Helper()
+
+	// Именно io.Reader, а не *strings.Reader: нулевой указатель в интерфейсе
+	// сам по себе не nil, и NewRequest полез бы читать из него.
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatalf("http.NewRequest(%s, %s) вернул ошибку: %v", method, url, err)
+	}
+	req.Header.Set("X-Owner-ID", "user-42")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req
+}
+
+// do выполняет запрос к поднятому серверу и закрывает тело ответа.
+func do(t *testing.T, req *http.Request) *http.Response {
+	t.Helper()
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s вернул ошибку: %v", req.Method, req.URL, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+
+	return resp
 }
