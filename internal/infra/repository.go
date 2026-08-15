@@ -55,6 +55,13 @@ func (r *InMemoryTaskRepository) Get(ctx context.Context, taskID todo.TaskID) (*
 
 	// Восстановление идёт уже без блокировки: снимок скопирован, а работа
 	// домена хранилища не касается.
+	//
+	// Отказ восстановления здесь недостижим и покрытием не берётся: в map
+	// попадают только снимки живых агрегатов, а их домен уже проверил. Ветка
+	// оживёт вместе с персистентным хранилищем, где снимок собирается из строк
+	// и может не сойтись с инвариантами. Убирать её до тех пор нельзя: Get
+	// обещает вызывающему валидный агрегат, и обещание должно опираться
+	// на проверку, а не на устройство конкретной реализации.
 	task, err := todo.ReconstituteTask(snapshot)
 	if err != nil {
 		return nil, 0, fmt.Errorf("infra: reconstitute task %s: %w", taskID, err)
@@ -82,18 +89,23 @@ func (r *InMemoryTaskRepository) Save(ctx context.Context, task *todo.Task, load
 	// сколько угодно, и «на единицу больше» их не переживает.
 	stored, ok := r.snapshots[task.ID()]
 
+	// Порядок веток важен. Версия живой задачи всегда не меньше единицы,
+	// поэтому loadedVersion == 0 однозначно читается как «не поднимал», а не
+	// как «поднял нулевую версию». Стой эта ветка последней, её перехватывала
+	// бы общая проверка версий, и вставка на занятое место объяснялась бы
+	// расхождением номеров вместо того, что случилось на самом деле.
 	switch {
-	case ok && stored.Version != loadedVersion:
-		return fmt.Errorf("infra: save task %s (loaded version %d, stored version %d): %w",
-			task.ID(), loadedVersion, stored.Version, app.ErrVersionConflict)
-	case !ok && loadedVersion != 0:
-		// Задачу поднимали из хранилища, а сейчас её там нет.
-		return fmt.Errorf("infra: save task %s (loaded version %d, not stored anymore): %w",
-			task.ID(), loadedVersion, app.ErrVersionConflict)
 	case ok && loadedVersion == 0:
 		// Писатель считает задачу новой, а место уже занято.
 		return fmt.Errorf("infra: insert task %s (already stored at version %d): %w",
 			task.ID(), stored.Version, app.ErrVersionConflict)
+	case !ok && loadedVersion != 0:
+		// Задачу поднимали из хранилища, а сейчас её там нет.
+		return fmt.Errorf("infra: save task %s (loaded version %d, not stored anymore): %w",
+			task.ID(), loadedVersion, app.ErrVersionConflict)
+	case ok && stored.Version != loadedVersion:
+		return fmt.Errorf("infra: save task %s (loaded version %d, stored version %d): %w",
+			task.ID(), loadedVersion, stored.Version, app.ErrVersionConflict)
 	}
 
 	r.snapshots[task.ID()] = task.Snapshot()

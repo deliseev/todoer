@@ -133,16 +133,19 @@ func (r *fakeRepository) Save(ctx context.Context, task *todo.Task, loadedVersio
 	snapshot := task.Snapshot()
 	stored, ok := r.tasks[snapshot.ID.String()]
 
+	// Порядок веток тот же, что у настоящего хранилища, и по той же причине:
+	// loadedVersion == 0 значит «не поднимал», и перехватывать этот случай
+	// общей проверкой версий нельзя.
 	switch {
-	case ok && stored.Version != loadedVersion:
-		return fmt.Errorf("fake: save task %s (loaded version %d, stored version %d): %w",
-			snapshot.ID, loadedVersion, stored.Version, app.ErrVersionConflict)
-	case !ok && loadedVersion != 0:
-		return fmt.Errorf("fake: save task %s (loaded version %d, not stored anymore): %w",
-			snapshot.ID, loadedVersion, app.ErrVersionConflict)
 	case ok && loadedVersion == 0:
 		return fmt.Errorf("fake: insert task %s (already stored at version %d): %w",
 			snapshot.ID, stored.Version, app.ErrVersionConflict)
+	case !ok && loadedVersion != 0:
+		return fmt.Errorf("fake: save task %s (loaded version %d, not stored anymore): %w",
+			snapshot.ID, loadedVersion, app.ErrVersionConflict)
+	case ok && stored.Version != loadedVersion:
+		return fmt.Errorf("fake: save task %s (loaded version %d, stored version %d): %w",
+			snapshot.ID, loadedVersion, stored.Version, app.ErrVersionConflict)
 	}
 
 	r.tasks[snapshot.ID.String()] = snapshot
