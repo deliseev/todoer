@@ -87,25 +87,12 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 // GetTask читает задачу владельца.
 //
 // Чтение не порождает событий, не двигает версию и не нуждается в блокировке,
-// поэтому идёт мимо mutate: общего с изменением у них только разбор
-// идентификаторов и проверка владельца.
+// поэтому идёт мимо mutate: общего с изменением у них только подъём задачи,
+// и он вынесен в load.
 func (s *TaskService) GetTask(ctx context.Context, query GetTaskQuery) (TaskView, error) {
-	id, err := todo.ParseTaskID(query.TaskID)
+	task, _, err := s.load(ctx, query.TaskID, query.OwnerID)
 	if err != nil {
 		return TaskView{}, err
-	}
-	owner, err := todo.ParseOwnerID(query.OwnerID)
-	if err != nil {
-		return TaskView{}, err
-	}
-
-	task, _, err := s.repo.Get(ctx, id)
-	if err != nil {
-		return TaskView{}, err
-	}
-	// То же правило, что и при изменении: для постороннего задачи не существует.
-	if task.OwnerID() != owner {
-		return TaskView{}, fmt.Errorf("app: task %s belongs to another owner: %w", id, ErrTaskNotFound)
 	}
 
 	return newTaskView(task.Snapshot()), nil
@@ -287,26 +274,9 @@ func (s *TaskService) mutate(
 	taskID, ownerID string,
 	mutate func(task *todo.Task, now time.Time) error,
 ) error {
-	id, err := todo.ParseTaskID(taskID)
+	task, loadedVersion, err := s.load(ctx, taskID, ownerID)
 	if err != nil {
 		return err
-	}
-	owner, err := todo.ParseOwnerID(ownerID)
-	if err != nil {
-		return err
-	}
-
-	task, loadedVersion, err := s.repo.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	// Для постороннего задачи не существует. Отказ по владельцу намеренно
-	// неотличим от отсутствия задачи: скажи мы «нельзя» вместо «нет»,
-	// и перебор идентификаторов начнёт рассказывать, какие из них заняты.
-	// Причина остаётся в тексте — для человека, читающего лог, а не для
-	// errors.Is.
-	if task.OwnerID() != owner {
-		return fmt.Errorf("app: task %s belongs to another owner: %w", id, ErrTaskNotFound)
 	}
 
 	// Доменная ошибка обогащается идентификатором задачи: сентинель говорит,
@@ -314,7 +284,7 @@ func (s *TaskService) mutate(
 	// разъедется с именем метода при первом же переименовании, а
 	// errors.Is-контракт от обёртки не меняется.
 	if err := mutate(task, s.clock.Now()); err != nil {
-		return fmt.Errorf("app: mutate task %s: %w", id, err)
+		return fmt.Errorf("app: mutate task %s: %w", task.ID(), err)
 	}
 
 	// Домен на повторе версию не двигает, а двигает её только apply — общий
@@ -335,7 +305,41 @@ func (s *TaskService) mutate(
 		return err
 	}
 
-	return s.publish(ctx, id, task.PullEvents())
+	return s.publish(ctx, task.ID(), task.PullEvents())
+}
+
+// load поднимает задачу владельца: разбирает идентификаторы, читает хранилище
+// и сверяет права. Общая часть чтения и изменения — и единственное место, где
+// живёт авторизация.
+//
+// Вынесено из mutate ради читающих сценариев: они идут мимо mutate, и без
+// общего подъёма следующий такой сценарий списывался бы с GetTask, а однажды
+// списался бы без проверки владельца. Версия подъёма возвращается всем,
+// но нужна только пишущим — читатель её отбрасывает.
+func (s *TaskService) load(ctx context.Context, taskID, ownerID string) (*todo.Task, int, error) {
+	id, err := todo.ParseTaskID(taskID)
+	if err != nil {
+		return nil, 0, err
+	}
+	owner, err := todo.ParseOwnerID(ownerID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	task, loadedVersion, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Для постороннего задачи не существует. Отказ по владельцу намеренно
+	// неотличим от отсутствия задачи: скажи мы «нельзя» вместо «нет»,
+	// и перебор идентификаторов начнёт рассказывать, какие из них заняты.
+	// Причина остаётся в тексте — для человека, читающего лог, а не для
+	// errors.Is.
+	if task.OwnerID() != owner {
+		return nil, 0, fmt.Errorf("app: task %s belongs to another owner: %w", id, ErrTaskNotFound)
+	}
+
+	return task, loadedVersion, nil
 }
 
 // publish отдаёт события публикатору. Неуспешная операция событий не
