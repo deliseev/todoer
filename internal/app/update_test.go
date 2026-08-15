@@ -270,6 +270,72 @@ func TestUpdateTask(t *testing.T) {
 		}
 	})
 
+	t.Run("просроченная задача переименовывается формой целиком", func(t *testing.T) {
+		// Круг GetTask → UpdateTask: клиент прочитал задачу, поправил заголовок
+		// и вернул форму как есть — вместе со сроком, который к этому моменту
+		// уже наступил. Отказывать тут не в чем: срок не меняется.
+		env := newTestEnv(t)
+		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+
+		stored, ok := env.repo.stored(task.ID())
+		if !ok {
+			t.Fatal("задача исчезла из хранилища")
+		}
+		sameDue := stored.DueDate.Time()
+
+		// Часы уходят за срок.
+		env.clock.set(sameDue.Add(time.Hour))
+
+		err := env.service.UpdateTask(t.Context(), app.UpdateTaskCommand{
+			TaskID:  task.ID().String(),
+			OwnerID: testOwner,
+			Title:   new("Купить кефир"),
+			DueDate: &app.DueDateUpdate{At: &sameDue},
+		})
+		if err != nil {
+			t.Fatalf("UpdateTask(...) вернул ошибку: %v", err)
+		}
+
+		after, ok := env.repo.stored(task.ID())
+		if !ok {
+			t.Fatal("задача исчезла из хранилища")
+		}
+		if after.Title.String() != "Купить кефир" {
+			t.Errorf("заголовок = %q, ожидался %q", after.Title, "Купить кефир")
+		}
+		if after.DueDate == nil || !after.DueDate.Time().Equal(sameDue) {
+			t.Errorf("срок = %v, ожидался %s", after.DueDate, sameDue)
+		}
+		// Сменился только заголовок, поэтому мутация ровно одна.
+		if want := stored.Version + 1; after.Version != want {
+			t.Errorf("версия = %d, ожидалась %d", after.Version, want)
+		}
+		if got := env.publisher.published(); len(got) != 1 || got[0] != todo.EventTaskRenamed {
+			t.Errorf("опубликованы события %v, ожидалось [%s]", got, todo.EventTaskRenamed)
+		}
+	})
+
+	t.Run("новый срок в прошлом по-прежнему отвергается", func(t *testing.T) {
+		// Послабление касается только собственного срока задачи.
+		env := newTestEnv(t)
+		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+		env.clock.set(testLater)
+		past := testNow.Add(-time.Hour)
+
+		err := env.service.UpdateTask(t.Context(), app.UpdateTaskCommand{
+			TaskID:  task.ID().String(),
+			OwnerID: testOwner,
+			Title:   new("Купить кефир"),
+			DueDate: &app.DueDateUpdate{At: &past},
+		})
+		if !errors.Is(err, todo.ErrDueDateInPast) {
+			t.Fatalf("ожидалась ErrDueDateInPast, получено: %v", err)
+		}
+		if env.repo.saveCount() != 0 {
+			t.Error("негодная команда дошла до записи")
+		}
+	})
+
 	t.Run("форма без правок не двигает версию и молчит", func(t *testing.T) {
 		// Клиент прочитал задачу через GetTask и вернул форму нетронутой.
 		// Это самый частый вид запроса у whole-form сценария, и изменением

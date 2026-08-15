@@ -505,6 +505,65 @@ func TestTaskMutationsWithSameValueChangeNothing(t *testing.T) {
 	})
 }
 
+func TestRescheduleToOwnOverdueDate(t *testing.T) {
+	t.Parallel()
+
+	// Задача с просроченным сроком законно живёт в хранилище, а TaskView
+	// отдаёт срок наружу — значит клиент, вернувший прочитанную форму целиком,
+	// пришлёт его обратно. Это повтор, а не назначение, и требовать от него
+	// будущего нельзя: иначе просроченную задачу не переименовать.
+	task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+	task.PullEvents()
+
+	wantVersion := task.Version()
+	wantUpdatedAt := task.UpdatedAt()
+
+	// «Сейчас» уже позже срока.
+	overdueNow := testTomorrowAt.Add(time.Hour)
+
+	same, ok := task.DueDate()
+	if !ok {
+		t.Fatal("у задачи нет срока")
+	}
+
+	t.Run("свой срок принимается и ничего не меняет", func(t *testing.T) {
+		if err := task.Reschedule(&same, overdueNow); err != nil {
+			t.Fatalf("повтор просроченного срока вернул ошибку: %v", err)
+		}
+		if got := task.Version(); got != wantVersion {
+			t.Errorf("версия = %d, ожидалась %d", got, wantVersion)
+		}
+		if got := task.UpdatedAt(); !got.Equal(wantUpdatedAt) {
+			t.Errorf("updatedAt = %s, ожидалось %s", got, wantUpdatedAt)
+		}
+		if events := task.PullEvents(); len(events) != 0 {
+			t.Errorf("события = %v, ожидалось пусто", eventNames(events))
+		}
+	})
+
+	t.Run("чужой просроченный срок по-прежнему отвергается", func(t *testing.T) {
+		// Послабление касается только повтора: назначить другой срок в прошлом
+		// нельзя, иначе проверка перестала бы существовать.
+		other := mustDueDate(t, testNow.Add(2*time.Hour))
+
+		if err := task.Reschedule(other, overdueNow); !errors.Is(err, todo.ErrDueDateInPast) {
+			t.Fatalf("ожидалась ErrDueDateInPast, получено: %v", err)
+		}
+	})
+
+	t.Run("HasDueDateAt узнаёт свой момент", func(t *testing.T) {
+		if !task.HasDueDateAt(testTomorrowAt) {
+			t.Error("задача не узнала собственный срок")
+		}
+		if task.HasDueDateAt(testTomorrowAt.Add(time.Second)) {
+			t.Error("задача признала своим чужой момент")
+		}
+		if newTestTask(t).HasDueDateAt(testTomorrowAt) {
+			t.Error("задача без срока признала момент своим")
+		}
+	})
+}
+
 func TestTaskMutationsRejectedOnTerminalStatus(t *testing.T) {
 	t.Parallel()
 

@@ -928,10 +928,13 @@ func TestRescheduleTask(t *testing.T) {
 		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
 
 		// Срок был в будущем при постановке задачи, но часы ушли вперёд.
+		// Момент именно чужой: собственный срок задачи — повтор, а не
+		// назначение, и под эту проверку он не подпадает.
 		env.clock.set(testDue.Add(time.Hour))
+		stale := testDue.Add(30 * time.Minute)
 
 		err := env.service.RescheduleTask(t.Context(), app.RescheduleTaskCommand{
-			TaskID: task.ID().String(), OwnerID: testOwner, DueDate: &testDue,
+			TaskID: task.ID().String(), OwnerID: testOwner, DueDate: &stale,
 		})
 		if !errors.Is(err, todo.ErrDueDateInPast) {
 			t.Fatalf("ожидалась ErrDueDateInPast, получено: %v", err)

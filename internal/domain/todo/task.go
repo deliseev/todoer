@@ -347,11 +347,15 @@ func (t *Task) Reschedule(dueDate *DueDate, now time.Time) error {
 	if err := t.ensureMutable(); err != nil {
 		return err
 	}
-	if dueDate != nil && !dueDate.Time().After(now) {
-		return ErrDueDateInPast
-	}
+	// Повтор проверяется раньше срока, и порядок здесь содержательный:
+	// перенос на уже стоящий момент — не перенос, требовать от него будущего
+	// не за что. Задача с просроченным сроком законно живёт в хранилище,
+	// и вернуть ей её же срок — не то же самое, что назначить просроченный.
 	if sameDueDate(dueDate, t.dueDate) {
 		return nil
+	}
+	if dueDate != nil && !dueDate.Time().After(now) {
+		return ErrDueDateInPast
 	}
 
 	t.dueDate = clonePtr(dueDate)
@@ -380,6 +384,16 @@ func (t *Task) Complete(now time.Time) error {
 // Cancel отменяет задачу.
 func (t *Task) Cancel(now time.Time) error {
 	return t.transitionTo(StatusCancelled, now, TaskCancelled{eventMeta: t.meta(now)})
+}
+
+// HasDueDateAt сообщает, что срок задачи назначен ровно на этот момент.
+//
+// Нужен сценарию, чтобы отличить повтор от назначения, не сравнивая сроки
+// самостоятельно: сравнение моментов — правило домена, и жить оно должно
+// здесь. Сличение идёт через Equal, поэтому тот же миг, присланный в другой
+// зоне, остаётся тем же.
+func (t *Task) HasDueDateAt(at time.Time) bool {
+	return t.dueDate != nil && t.dueDate.Time().Equal(at)
 }
 
 // IsOverdue сообщает, что срок выполнения истёк к моменту now.

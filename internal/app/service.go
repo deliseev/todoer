@@ -198,7 +198,7 @@ func (s *TaskService) UpdateTask(ctx context.Context, cmd UpdateTaskCommand) err
 			}
 		}
 		if cmd.DueDate != nil {
-			dueDate, err := parseDueDate(cmd.DueDate.At, now)
+			dueDate, err := resolveDueDate(task, cmd.DueDate.At, now)
 			if err != nil {
 				return err
 			}
@@ -246,7 +246,7 @@ func (s *TaskService) RescheduleTask(ctx context.Context, cmd RescheduleTaskComm
 		// до него: срок обязан проверяться относительно того же «сейчас»,
 		// с которым его увидит домен. Плата — лишний поход в хранилище,
 		// когда срок заведомо негоден; она сознательная.
-		dueDate, err := parseDueDate(cmd.DueDate, now)
+		dueDate, err := resolveDueDate(task, cmd.DueDate, now)
 		if err != nil {
 			return err
 		}
@@ -375,8 +375,29 @@ func parseOptionalPriority(s string) (todo.Priority, error) {
 	return todo.ParsePriority(s)
 }
 
+// resolveDueDate превращает присланный момент в срок уже существующей задачи.
+//
+// Момент, на который срок задачи уже назначен, возвращается как есть и проверку
+// на будущее не проходит: это повтор, а не назначение. Без этого круг
+// GetTask → UpdateTask разрывался бы на просроченной задаче — TaskView отдаёт
+// срок наружу, клиент возвращает форму целиком, и поменять у такой задачи
+// нельзя было бы даже заголовок. Отличает повтор от назначения домен
+// (HasDueDateAt): сравнивать сроки самостоятельно сценарию нечем и незачем.
+func resolveDueDate(task *todo.Task, at *time.Time, now time.Time) (*todo.DueDate, error) {
+	if at == nil || !task.HasDueDateAt(*at) {
+		return parseDueDate(at, now)
+	}
+
+	// HasDueDateAt уже подтвердил, что срок есть.
+	current, _ := task.DueDate()
+	return &current, nil
+}
+
 // parseDueDate превращает необязательный момент времени в срок выполнения.
 // Nil остаётся nil: отсутствие срока — законное состояние задачи.
+//
+// Для существующей задачи звать надо resolveDueDate: здесь проверка на будущее
+// безусловна, а повтор собственного срока ей не подчиняется.
 func parseDueDate(at *time.Time, now time.Time) (*todo.DueDate, error) {
 	if at == nil {
 		return nil, nil
