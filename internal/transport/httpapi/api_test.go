@@ -136,6 +136,17 @@ func TestCreateTask(t *testing.T) {
 			t.Errorf("Location = %q, ожидался %q", rec.Header().Get("Location"), want)
 		}
 
+		// Тело несёт идентификатор созданной задачи, и только его: остальное
+		// клиент уже знает — он это и прислал, а статус, версию и времена
+		// назначает домен, и за ними придётся сходить отдельно.
+		body := decodeBody(t, rec)
+		if got := body["id"]; got != service.createID.String() {
+			t.Errorf("id в ответе = %#v, ожидался %q", got, service.createID.String())
+		}
+		if len(body) != 1 {
+			t.Errorf("полей в ответе %d, ожидалось 1 (%v)", len(body), body)
+		}
+
 		// Команда собрана из тела и заголовка, а не откуда-то ещё.
 		cmd := service.createCmd
 		if cmd.OwnerID != testOwner {

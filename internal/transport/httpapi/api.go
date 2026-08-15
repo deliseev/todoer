@@ -153,10 +153,11 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request, owner strin
 		return
 	}
 
-	// Location указывает на созданный ресурс: иначе идентификатор клиенту
-	// негде взять, кроме как разбирая тело.
+	// Location указывает на созданный ресурс, тело несёт тот же идентификатор:
+	// заголовок — для клиента, ходящего по ссылкам, поле — для того, кто
+	// разбирает JSON, и разбирать Location ради идентификатора ему не нужно.
 	w.Header().Set("Location", "/tasks/"+id.String())
-	writeJSON(w, http.StatusCreated, "")
+	writeJSON(w, http.StatusCreated, createdResponse{ID: id.String()})
 }
 
 // getTask отдаёт задачу целиком: GET /tasks/{id}.
@@ -341,6 +342,16 @@ func parseDueDateUpdate(raw json.RawMessage) (*app.DueDateUpdate, error) {
 		return nil, err
 	}
 	return &app.DueDateUpdate{At: at}, nil
+}
+
+// createdResponse — тело ответа на создание.
+//
+// Одно поле, и это не заготовка под задачу целиком: остальное клиент только
+// что прислал сам, а статус, версию и времена назначает домен — собери мы
+// их здесь из присланного, клиент увидел бы не то, что лежит в хранилище.
+// Кому нужна задача целиком, тот идёт по Location.
+type createdResponse struct {
+	ID string `json:"id"`
 }
 
 // taskResponse — задача на проводе.
