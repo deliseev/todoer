@@ -35,6 +35,7 @@ type fakeRepository struct {
 	// так тест изображает чужую запись, вклинившуюся между Get и Save.
 	beforeSave func()
 
+	gets  int
 	saves int
 }
 
@@ -86,6 +87,10 @@ func (r *fakeRepository) Get(ctx context.Context, id todo.TaskID) (*todo.Task, i
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Считается всякое обращение, включая отказное: тесты проверяют, что
+	// негодная команда не стоила похода в хранилище, а не что поход удался.
+	r.gets++
 
 	if r.getErr != nil {
 		return nil, 0, r.getErr
@@ -170,6 +175,14 @@ func (r *fakeRepository) put(snapshot todo.TaskSnapshot) {
 	defer r.mu.Unlock()
 
 	r.tasks[snapshot.ID.String()] = snapshot
+}
+
+// getCount возвращает число обращений на чтение.
+func (r *fakeRepository) getCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.gets
 }
 
 // saveCount возвращает число состоявшихся записей.

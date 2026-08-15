@@ -177,11 +177,18 @@ func TestUpdateTask(t *testing.T) {
 		}
 	})
 
-	t.Run("некорректные поля не доходят до хранилища", func(t *testing.T) {
+	t.Run("некорректные поля не доходят до записи", func(t *testing.T) {
+		// Записи не происходит ни в одном случае, а вот чтение — по-разному,
+		// и это сознательная асимметрия сценария: всё, что можно разобрать
+		// до похода в хранилище, разбирается до него, но сроку нужен тот же
+		// «сейчас», который увидит домен, поэтому он разбирается внутри.
+		// wantReads это и фиксирует — иначе группа обещала бы больше,
+		// чем проверяет.
 		cases := []struct {
-			name    string
-			mutate  func(*app.UpdateTaskCommand)
-			wantErr error
+			name      string
+			mutate    func(*app.UpdateTaskCommand)
+			wantErr   error
+			wantReads int
 		}{
 			{
 				name:    "пустой заголовок",
@@ -207,6 +214,9 @@ func TestUpdateTask(t *testing.T) {
 					c.DueDate = &app.DueDateUpdate{At: &past}
 				},
 				wantErr: todo.ErrDueDateInPast,
+				// Срок разбирается внутри мутатора, то есть уже после Get.
+				// Плата за то, чтобы проверять его по часам сервиса.
+				wantReads: 1,
 			},
 		}
 
@@ -221,8 +231,11 @@ func TestUpdateTask(t *testing.T) {
 				if err := env.service.UpdateTask(t.Context(), cmd); !errors.Is(err, tc.wantErr) {
 					t.Fatalf("ожидалась %v, получено: %v", tc.wantErr, err)
 				}
-				if env.repo.saveCount() != 0 {
-					t.Error("некорректная команда дошла до записи")
+				if got := env.repo.saveCount(); got != 0 {
+					t.Errorf("записей %d, ожидалось 0 — некорректная команда дошла до записи", got)
+				}
+				if got := env.repo.getCount(); got != tc.wantReads {
+					t.Errorf("чтений %d, ожидалось %d", got, tc.wantReads)
 				}
 			})
 		}
