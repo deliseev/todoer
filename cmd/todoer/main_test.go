@@ -49,6 +49,32 @@ func TestListenAddr(t *testing.T) {
 	})
 }
 
+func TestNewServer(t *testing.T) {
+	t.Parallel()
+
+	// Нулевой таймаут у http.Server значит «ждать вечно», поэтому проверяется
+	// именно ненулевость. Одного ReadHeaderTimeout мало: клиент, приславший
+	// корректные заголовки и сочащий тело по байту, застревает уже в чтении
+	// тела, а спящий в keep-alive — вообще ни в одной из фаз запроса.
+	server := newServer(http.NewServeMux())
+
+	timeouts := []struct {
+		name string
+		got  time.Duration
+	}{
+		{"ReadHeaderTimeout", server.ReadHeaderTimeout},
+		{"ReadTimeout", server.ReadTimeout},
+		{"WriteTimeout", server.WriteTimeout},
+		{"IdleTimeout", server.IdleTimeout},
+	}
+
+	for _, timeout := range timeouts {
+		if timeout.got <= 0 {
+			t.Errorf("%s = %s, ожидался ненулевой таймаут", timeout.name, timeout.got)
+		}
+	}
+}
+
 func TestRun(t *testing.T) {
 	t.Parallel()
 

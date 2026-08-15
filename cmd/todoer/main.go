@@ -34,10 +34,22 @@ const (
 	addrEnv     = "TODOER_ADDR"
 	defaultAddr = ":8080"
 
-	// readHeaderTimeout — сколько ждать заголовков запроса. Без него открытое
-	// и молчащее соединение держит воркер вечно, а это уже отказ в
-	// обслуживании — самый дешёвый из возможных.
+	// Таймауты сервера. Нулевой таймаут у http.Server значит «ждать вечно»,
+	// а вечно ждущее соединение — самый дешёвый отказ в обслуживании из
+	// возможных: он не стоит атакующему ничего. Поэтому закрыты все фазы,
+	// а не одни заголовки.
+	//
+	// readHeaderTimeout — молчащее соединение, не приславшее заголовков;
+	// readTimeout — весь запрос целиком, то есть и тело, сочащееся по байту;
+	// writeTimeout — работа хендлера и отправка ответа, включая клиента,
+	// который не читает; idleTimeout — сон между запросами в keep-alive.
+	//
+	// Числа с запасом: тело ограничено 64 КиБ, а хендлеры работают с памятью,
+	// так что законный запрос не приближается к этим границам.
 	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 60 * time.Second
 
 	// shutdownTimeout — сколько ждать текущие запросы при остановке. Дальше
 	// сервер закрывается, не дожидаясь их: висящий бесконечно процесс хуже
@@ -103,10 +115,7 @@ func run(ctx context.Context, out io.Writer, addr string) error {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
-	server := &http.Server{
-		Handler:           handler.Routes(),
-		ReadHeaderTimeout: readHeaderTimeout,
-	}
+	server := newServer(handler.Routes())
 
 	fmt.Fprintf(out, "todoer слушает http://%s\n", listener.Addr())
 
@@ -119,6 +128,21 @@ func run(ctx context.Context, out io.Writer, addr string) error {
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 		return shutdown(ctx, out, server)
+	}
+}
+
+// newServer собирает сервер с закрытыми таймаутами всех фаз.
+//
+// Вынесен отдельно, чтобы тест мог убедиться, что ни один из них не остался
+// нулевым: пропажу таймаута иначе видно только под нагрузкой, когда чинить
+// уже поздно.
+func newServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 }
 
