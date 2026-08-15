@@ -84,6 +84,55 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 	return id, s.publish(ctx, id, task.PullEvents())
 }
 
+// GetTask читает задачу владельца.
+//
+// Чтение не порождает событий, не двигает версию и не нуждается в блокировке,
+// поэтому идёт мимо mutate: общего с изменением у них только разбор
+// идентификаторов и проверка владельца.
+func (s *TaskService) GetTask(ctx context.Context, query GetTaskQuery) (TaskView, error) {
+	id, err := todo.ParseTaskID(query.TaskID)
+	if err != nil {
+		return TaskView{}, err
+	}
+	owner, err := todo.ParseOwnerID(query.OwnerID)
+	if err != nil {
+		return TaskView{}, err
+	}
+
+	task, _, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return TaskView{}, err
+	}
+	// То же правило, что и при изменении: для постороннего задачи не существует.
+	if task.OwnerID() != owner {
+		return TaskView{}, fmt.Errorf("app: task %s belongs to another owner: %w", id, ErrTaskNotFound)
+	}
+
+	return newTaskView(task.Snapshot()), nil
+}
+
+// newTaskView раскладывает снимок в плоское представление для чтения.
+func newTaskView(snapshot todo.TaskSnapshot) TaskView {
+	view := TaskView{
+		ID:          snapshot.ID.String(),
+		OwnerID:     snapshot.OwnerID.String(),
+		Title:       snapshot.Title.String(),
+		Description: snapshot.Description.String(),
+		Status:      snapshot.Status.String(),
+		Priority:    snapshot.Priority.String(),
+		CreatedAt:   snapshot.CreatedAt,
+		UpdatedAt:   snapshot.UpdatedAt,
+		CompletedAt: snapshot.CompletedAt,
+		Version:     snapshot.Version,
+	}
+	if snapshot.DueDate != nil {
+		dueDate := snapshot.DueDate.Time()
+		view.DueDate = &dueDate
+	}
+
+	return view
+}
+
 // RenameTask меняет заголовок задачи.
 func (s *TaskService) RenameTask(ctx context.Context, cmd RenameTaskCommand) error {
 	title, err := todo.NewTitle(cmd.Title)
