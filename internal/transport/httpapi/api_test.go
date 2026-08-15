@@ -79,6 +79,41 @@ func TestOwnerHeader(t *testing.T) {
 	}
 }
 
+func TestRequestBodyLimit(t *testing.T) {
+	// Тело ограничено сверху, и отказ обязан случиться до похода в app.
+	// Транспорт разбирает раньше, чем сценарий проверит длину, поэтому без
+	// потолка гигабайтный заголовок целиком оказался бы в памяти — и только
+	// потом получил бы 400 за длину.
+	requests := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{"создание", http.MethodPost, "/tasks"},
+		{"изменение", http.MethodPatch, "/tasks/" + testTaskID},
+	}
+
+	// Заведомо больше потолка: законное тело ограничено доменом (заголовок
+	// и описание вместе — тысячи рун, не мегабайты).
+	huge := `{"title":"` + strings.Repeat("a", 2<<20) + `"}`
+
+	for _, r := range requests {
+		t.Run(r.name, func(t *testing.T) {
+			service := newFakeService()
+			service.view = testView()
+
+			rec := do(t, newTestServer(t, service), r.method, r.target, huge)
+
+			// 413, а не 400: дело не в форме запроса, а в его размере.
+			requireStatus(t, rec, http.StatusRequestEntityTooLarge)
+			requireJSONContentType(t, rec)
+			if got := service.totalCalls(); got != 0 {
+				t.Errorf("обращений к сценариям %d, ожидалось 0 — огромное тело дошло до app", got)
+			}
+		})
+	}
+}
+
 func TestCreateTask(t *testing.T) {
 	t.Run("задача создаётся", func(t *testing.T) {
 		service := newFakeService()

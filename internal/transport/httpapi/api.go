@@ -137,11 +137,7 @@ func withOwner(next ownerHandler) http.HandlerFunc {
 // и времена назначает домен.
 func (h *Handler) createTask(w http.ResponseWriter, r *http.Request, owner string) {
 	var req createTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Разбор тела — работа транспорта, и негодное тело до сценария
-		// доходить не должно: чтения оно не стоит. Сюда же попадает срок
-		// не по RFC 3339 — его разбирает сам encoding/json.
-		writeError(w, http.StatusBadRequest, "malformed request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -191,8 +187,7 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request, owner string) 
 // второго носителя одного правила.
 func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request, owner string) {
 	var req updateTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -261,6 +256,48 @@ func (h *Handler) changeStatus(w http.ResponseWriter, r *http.Request, owner str
 }
 
 // Запросы и ответы на проводе.
+
+// maxBodyBytes — потолок размера тела запроса.
+//
+// Законное тело ограничено доменом: заголовок — 256 рун, описание — 4096,
+// то есть в худшем случае с экранированием десятки килобайт. Отсюда 64 КиБ
+// с запасом. Числа домена сюда не импортируются: это предел провода,
+// а не доменное правило, и связывать их — значит менять форму HTTP при
+// каждой правке ограничений задачи.
+const maxBodyBytes = 64 << 10
+
+// decodeBody разбирает тело запроса, а на негодном сам отвечает отказом.
+//
+// Потолок нужен потому, что транспорт разбирает раньше, чем сценарий проверит
+// длину: без него гигабайтный заголовок сначала целиком оказался бы в памяти
+// и только потом получил бы 400 за длину, а несколько таких запросов положили
+// бы процесс. Превышение — 413, а не 400: дело не в форме запроса, а в его
+// размере, и клиенту стоит знать, что укоротить надо тело, а не поля.
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	// MaxBytesReader вешается на ответ, а не только на чтение: он же закрывает
+	// соединение, чтобы отправитель не досылал остаток в никуда.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+
+	err := json.NewDecoder(r.Body).Decode(dst)
+	switch {
+	case err == nil:
+		return true
+	case isTooLarge(err):
+		writeError(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("request body exceeds %d bytes", maxBodyBytes))
+	default:
+		// Сюда же попадает срок не по RFC 3339 — его разбирает сам
+		// encoding/json, и до сценария такое тело не доходит.
+		writeError(w, http.StatusBadRequest, "malformed request body")
+	}
+	return false
+}
+
+// isTooLarge отличает превышение потолка от прочих бед разбора.
+func isTooLarge(err error) bool {
+	_, ok := errors.AsType[*http.MaxBytesError](err)
+	return ok
+}
 
 // createTaskRequest — тело POST /tasks.
 //
