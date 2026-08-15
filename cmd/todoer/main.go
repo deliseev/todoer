@@ -63,10 +63,27 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	restoreSignalsOnCancel(ctx, stop)
+
 	if err := run(ctx, os.Stdout, listenAddr()); err != nil {
 		fmt.Fprintln(os.Stderr, "todoer:", err)
 		os.Exit(1)
 	}
+}
+
+// restoreSignalsOnCancel возвращает сигналам обычное поведение, как только
+// контекст отменён.
+//
+// Первый сигнал запускает остановку, а она длится до shutdownTimeout. Всё это
+// время обработчик, поставленный NotifyContext, продолжает ловить сигналы —
+// и второй Ctrl+C оператора, которому надоело ждать, не делает ничего:
+// контекст уже отменён. Сняв обработчик сразу после отмены, мы возвращаем
+// второму сигналу его обычное действие — убить процесс.
+func restoreSignalsOnCancel(ctx context.Context, restore func()) {
+	go func() {
+		<-ctx.Done()
+		restore()
+	}()
 }
 
 // listenAddr выбирает адрес прослушивания: из окружения, иначе умолчание.

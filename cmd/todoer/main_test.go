@@ -49,6 +49,33 @@ func TestListenAddr(t *testing.T) {
 	})
 }
 
+func TestRestoreSignalsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	// Первый сигнал отменяет контекст и запускает остановку, которая длится
+	// до десяти секунд. Всё это время обработчик сигналов обязан быть снят:
+	// иначе второй Ctrl+C нетерпеливого оператора будет проглочен — контекст
+	// уже отменён, и делать этому сигналу нечего.
+	restored := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+
+	restoreSignalsOnCancel(ctx, func() { close(restored) })
+
+	select {
+	case <-restored:
+		t.Fatal("поведение сигналов восстановлено до отмены: первый же сигнал убьёт процесс на месте")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case <-restored:
+	case <-time.After(2 * time.Second):
+		t.Fatal("после отмены поведение сигналов не восстановлено: второй сигнал будет проглочен")
+	}
+}
+
 func TestNewServer(t *testing.T) {
 	t.Parallel()
 
