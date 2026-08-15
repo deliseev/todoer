@@ -109,12 +109,20 @@ func newTaskView(snapshot todo.TaskSnapshot) TaskView {
 		Priority:    snapshot.Priority.String(),
 		CreatedAt:   snapshot.CreatedAt,
 		UpdatedAt:   snapshot.UpdatedAt,
-		CompletedAt: snapshot.CompletedAt,
 		Version:     snapshot.Version,
 	}
+	// Оба необязательных поля копируются, и одинаково. Сегодня снимок приходит
+	// из Task.Snapshot(), где указатели уже клонированы, но функция принимает
+	// любой TaskSnapshot: первый же порт запросов, собравший снимок мимо
+	// агрегата, отдал бы наружу записываемое окно в хранилище — ровно та дыра,
+	// ради которой в домене заведён clonePtr.
 	if snapshot.DueDate != nil {
 		dueDate := snapshot.DueDate.Time()
 		view.DueDate = &dueDate
+	}
+	if snapshot.CompletedAt != nil {
+		completedAt := *snapshot.CompletedAt
+		view.CompletedAt = &completedAt
 	}
 
 	return view
