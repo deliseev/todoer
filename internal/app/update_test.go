@@ -296,6 +296,11 @@ func TestUpdateTask(t *testing.T) {
 			t.Fatalf("UpdateTask(...) вернул ошибку: %v", err)
 		}
 
+		// Писать нечего: снимок в хранилище уже такой.
+		if got := env.repo.saveCount(); got != 0 {
+			t.Errorf("записей %d, ожидалось 0", got)
+		}
+
 		after, ok := env.repo.stored(task.ID())
 		if !ok {
 			t.Fatal("задача исчезла из хранилища")

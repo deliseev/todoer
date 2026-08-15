@@ -436,6 +436,77 @@ func TestTaskMutationsSuccess(t *testing.T) {
 	}
 }
 
+func TestTaskMutationsWithoutChangeSkipWrite(t *testing.T) {
+	// Домен на повторе не двигает версию, и сценарию писать нечего: снимок
+	// в хранилище уже такой. Лишняя запись не портит данные, но подставляет
+	// вызывающего под ErrVersionConflict за чужую запись, случившуюся между
+	// Get и Save, — за изменение, которого он не делал.
+	t.Run("тот же заголовок не доходит до записи", func(t *testing.T) {
+		env := newTestEnv(t)
+		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+		env.clock.set(testLater)
+
+		before, ok := env.repo.stored(task.ID())
+		if !ok {
+			t.Fatal("задача исчезла из хранилища")
+		}
+
+		err := env.service.RenameTask(t.Context(), app.RenameTaskCommand{
+			TaskID:  task.ID().String(),
+			OwnerID: testOwner,
+			Title:   before.Title.String(),
+		})
+		if err != nil {
+			t.Fatalf("RenameTask(...) вернул ошибку: %v", err)
+		}
+
+		if got := env.repo.saveCount(); got != 0 {
+			t.Errorf("записей %d, ожидалось 0", got)
+		}
+		if got := env.publisher.callCount(); got != 0 {
+			t.Errorf("обращений к публикатору %d, ожидалось 0", got)
+		}
+	})
+
+	t.Run("чужая запись между Get и Save не мешает пустой команде", func(t *testing.T) {
+		// Раз писать нечего, то и конфликтовать не с чем: команда, ничего
+		// не меняющая, обязана пережить параллельного редактора.
+		env := newTestEnv(t)
+		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+		env.clock.set(testLater)
+
+		before, ok := env.repo.stored(task.ID())
+		if !ok {
+			t.Fatal("задача исчезла из хранилища")
+		}
+
+		// Хук изображает соседа, записавшего свою правку между Get и Save.
+		// Если сценарий всё-таки полезет писать, он получит конфликт версий
+		// за изменение, которого не делал.
+		env.repo.onBeforeSave(func() {
+			rival, err := todo.ReconstituteTask(before)
+			if err != nil {
+				t.Errorf("ReconstituteTask(...) вернул ошибку: %v", err)
+				return
+			}
+			if err := rival.Rename(mustTitle(t, "Версия соседа"), testLater); err != nil {
+				t.Errorf("Rename(...) вернул ошибку: %v", err)
+				return
+			}
+			env.repo.put(rival.Snapshot())
+		})
+
+		err := env.service.RenameTask(t.Context(), app.RenameTaskCommand{
+			TaskID:  task.ID().String(),
+			OwnerID: testOwner,
+			Title:   before.Title.String(),
+		})
+		if err != nil {
+			t.Fatalf("RenameTask(...) вернул ошибку: %v", err)
+		}
+	})
+}
+
 func TestTaskMutationsRejectForeignOwner(t *testing.T) {
 	for _, m := range taskMutations() {
 		t.Run(m.name, func(t *testing.T) {
