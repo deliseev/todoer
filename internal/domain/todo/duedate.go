@@ -27,6 +27,16 @@ func (d DueDate) Time() time.Time {
 	return d.at
 }
 
+// Equal сравнивает сроки как моменты времени.
+//
+// Через time.Equal, а не через == у структуры: оператор сличает у time.Time
+// внутреннее представление — стенные часы, монотонный отсчёт и указатель
+// на зону. Нормализация в UTC при создании делает == почти всегда верным,
+// и «почти» здесь опаснее явной ошибки.
+func (d DueDate) Equal(other DueDate) bool {
+	return d.at.Equal(other.at)
+}
+
 // IsZero сообщает, что срок не был инициализирован.
 func (d DueDate) IsZero() bool {
 	return d.at.IsZero()

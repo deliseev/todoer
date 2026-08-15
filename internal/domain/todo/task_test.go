@@ -405,6 +405,106 @@ func statusMutations() []mutation {
 	}
 }
 
+// sameValueMutations — операции, которым скармливают то значение, что у задачи
+// уже стоит.
+//
+// Ровно это делает клиент, присылающий форму целиком: какие поля пользователь
+// тронул, он не знает, поэтому шлёт все. Добавляя мутатор в fieldMutations,
+// добавить его и сюда — иначе повтор на нём останется незамеченным.
+func sameValueMutations() []mutation {
+	return []mutation{
+		{
+			name: "тот же заголовок",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error {
+				return task.Rename(task.Title(), now)
+			},
+		},
+		{
+			name: "то же описание",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error {
+				return task.Describe(task.Description(), now)
+			},
+		},
+		{
+			name: "тот же приоритет",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error {
+				return task.ChangePriority(task.Priority(), now)
+			},
+		},
+		{
+			name: "тот же срок",
+			apply: func(_ *testing.T, task *todo.Task, now time.Time) error {
+				due, ok := task.DueDate()
+				if !ok {
+					return task.Reschedule(nil, now)
+				}
+				return task.Reschedule(&due, now)
+			},
+		},
+	}
+}
+
+func TestTaskMutationsWithSameValueChangeNothing(t *testing.T) {
+	t.Parallel()
+
+	// Мутация, ничего не меняющая, — не мутация. Двигать версию и порождать
+	// событие на ней нельзя: подписчики получат «изменилось» на неизменившейся
+	// задаче, а параллельный редактор, державший прежнюю версию, поймает
+	// конфликт на пустом месте.
+	for _, mut := range sameValueMutations() {
+		t.Run(mut.name, func(t *testing.T) {
+			t.Parallel()
+
+			task := newTestTaskWithDueDate(t, mustDueDate(t, testNow.Add(24*time.Hour)))
+			// События создания забираем заранее: смотреть надо только на то,
+			// что породил повтор.
+			task.PullEvents()
+
+			wantVersion := task.Version()
+			wantUpdatedAt := task.UpdatedAt()
+
+			if err := mut.apply(t, task, testNow.Add(time.Hour)); err != nil {
+				t.Fatalf("повтор вернул ошибку: %v", err)
+			}
+
+			if got := task.Version(); got != wantVersion {
+				t.Errorf("версия = %d, ожидалась %d", got, wantVersion)
+			}
+			if got := task.UpdatedAt(); !got.Equal(wantUpdatedAt) {
+				t.Errorf("updatedAt = %s, ожидалось %s", got, wantUpdatedAt)
+			}
+			if events := task.PullEvents(); len(events) != 0 {
+				t.Errorf("события = %v, ожидалось пусто", eventNames(events))
+			}
+		})
+	}
+
+	t.Run("снятие отсутствующего срока", func(t *testing.T) {
+		t.Parallel()
+
+		// Отсутствие срока — тоже значение, и снять его дважды нельзя.
+		task := newTestTask(t)
+		task.PullEvents()
+
+		wantVersion := task.Version()
+		wantUpdatedAt := task.UpdatedAt()
+
+		if err := task.Reschedule(nil, testNow.Add(time.Hour)); err != nil {
+			t.Fatalf("Reschedule(nil) вернул ошибку: %v", err)
+		}
+
+		if got := task.Version(); got != wantVersion {
+			t.Errorf("версия = %d, ожидалась %d", got, wantVersion)
+		}
+		if got := task.UpdatedAt(); !got.Equal(wantUpdatedAt) {
+			t.Errorf("updatedAt = %s, ожидалось %s", got, wantUpdatedAt)
+		}
+		if events := task.PullEvents(); len(events) != 0 {
+			t.Errorf("события = %v, ожидалось пусто", eventNames(events))
+		}
+	})
+}
+
 func TestTaskMutationsRejectedOnTerminalStatus(t *testing.T) {
 	t.Parallel()
 

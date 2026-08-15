@@ -269,4 +269,45 @@ func TestUpdateTask(t *testing.T) {
 			t.Error("чужая команда дошла до записи")
 		}
 	})
+
+	t.Run("форма без правок не двигает версию и молчит", func(t *testing.T) {
+		// Клиент прочитал задачу через GetTask и вернул форму нетронутой.
+		// Это самый частый вид запроса у whole-form сценария, и изменением
+		// он не является: ни версия, ни подписчики о нём знать не должны.
+		env := newTestEnv(t)
+		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+		env.clock.set(testLater)
+
+		before, ok := env.repo.stored(task.ID())
+		if !ok {
+			t.Fatal("задача исчезла из хранилища")
+		}
+		sameDue := before.DueDate.Time()
+
+		err := env.service.UpdateTask(t.Context(), app.UpdateTaskCommand{
+			TaskID:      task.ID().String(),
+			OwnerID:     testOwner,
+			Title:       new(before.Title.String()),
+			Description: new(before.Description.String()),
+			Priority:    new(before.Priority.String()),
+			DueDate:     &app.DueDateUpdate{At: &sameDue},
+		})
+		if err != nil {
+			t.Fatalf("UpdateTask(...) вернул ошибку: %v", err)
+		}
+
+		after, ok := env.repo.stored(task.ID())
+		if !ok {
+			t.Fatal("задача исчезла из хранилища")
+		}
+		if after.Version != before.Version {
+			t.Errorf("версия = %d, ожидалась %d", after.Version, before.Version)
+		}
+		if !after.UpdatedAt.Equal(before.UpdatedAt) {
+			t.Errorf("updatedAt = %s, ожидалось %s", after.UpdatedAt, before.UpdatedAt)
+		}
+		if published := env.publisher.published(); len(published) != 0 {
+			t.Errorf("опубликовано %v, ожидалось пусто", published)
+		}
+	})
 }

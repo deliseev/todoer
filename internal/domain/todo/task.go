@@ -58,6 +58,21 @@ func clonePtr[T any](p *T) *T {
 	return &v
 }
 
+// sameDueDate сообщает, что два необязательных срока означают одно и то же:
+// либо оба отсутствуют, либо оба назначены на один момент.
+//
+// Nil здесь — полноценное значение «срока нет», а не пропуск, поэтому «оба
+// отсутствуют» и «один отсутствует» разводятся явно.
+func sameDueDate(a, b *DueDate) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	}
+	return a.Equal(*b)
+}
+
 // NewTask создаёт новую задачу и порождает событие TaskCreated.
 // Аргумент dueDate необязателен: nil означает задачу без срока.
 func NewTask(
@@ -245,6 +260,12 @@ func (t *Task) meta(now time.Time) eventMeta {
 //
 // Вызывается последней строкой каждого мутатора — ровно затем, чтобы забыть
 // одну из трёх частей было негде.
+//
+// До apply мутатор обязан отсеять повтор: если присланное значение совпадает
+// с текущим, изменения не произошло, и возвращать надо nil, не трогая ни
+// версию, ни события. Иначе клиент, присылающий форму целиком, каждым
+// сохранением рассылает «изменилось» по неизменившимся полям и сдвигает
+// версию, ломая оптимистичную блокировку остальным.
 func (t *Task) apply(now time.Time, event DomainEvent) {
 	t.updatedAt = now
 	t.version++
@@ -274,6 +295,9 @@ func (t *Task) Rename(title Title, now time.Time) error {
 	if title.IsZero() {
 		return ErrEmptyTitle
 	}
+	if title == t.title {
+		return nil
+	}
 
 	t.title = title
 	t.apply(now, TaskRenamed{eventMeta: t.meta(now), NewTitle: title})
@@ -286,6 +310,10 @@ func (t *Task) Rename(title Title, now time.Time) error {
 func (t *Task) Describe(description Description, now time.Time) error {
 	if err := t.ensureMutable(); err != nil {
 		return err
+	}
+
+	if description == t.description {
+		return nil
 	}
 
 	t.description = description
@@ -301,6 +329,9 @@ func (t *Task) ChangePriority(priority Priority, now time.Time) error {
 	}
 	if !priority.IsValid() {
 		return ErrUnknownPriority
+	}
+	if priority == t.priority {
+		return nil
 	}
 
 	t.priority = priority
@@ -318,6 +349,9 @@ func (t *Task) Reschedule(dueDate *DueDate, now time.Time) error {
 	}
 	if dueDate != nil && !dueDate.Time().After(now) {
 		return ErrDueDateInPast
+	}
+	if sameDueDate(dueDate, t.dueDate) {
+		return nil
 	}
 
 	t.dueDate = clonePtr(dueDate)

@@ -3,6 +3,7 @@ package todo_test
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
 )
@@ -157,8 +158,10 @@ func TestRescheduleEmitsEventWithNewDueDate(t *testing.T) {
 		wantNil bool
 	}{
 		{
+			// Срок именно другой: задача создаётся с testTomorrowAt, и перенос
+			// на тот же момент изменением не является — события не будет.
 			name:    "назначение срока",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testTomorrowAt) },
+			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testTomorrowAt.Add(24*time.Hour)) },
 		},
 		{
 			name:    "снятие срока",
