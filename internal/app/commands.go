@@ -20,6 +20,32 @@ type CreateTaskCommand struct {
 	DueDate *time.Time
 }
 
+// UpdateTaskCommand — частичное изменение задачи: заданные поля применяются
+// одной записью, незаданные не трогаются.
+//
+// Все поля необязательные и потому указатели: nil означает «не менять»,
+// а не «поставить пустое». Отличать одно от другого обязательно — иначе
+// запрос, меняющий заголовок, заодно стирает описание.
+type UpdateTaskCommand struct {
+	TaskID  string
+	OwnerID string
+
+	Title       *string
+	Description *string
+	Priority    *string
+	DueDate     *DueDateUpdate
+}
+
+// DueDateUpdate — изменение срока, у которого три состояния вместо двух.
+//
+// Nil вместо самого DueDateUpdate означает «не трогать срок», DueDateUpdate
+// с пустым At — «снять срок», с заданным At — «назначить». Флаг рядом
+// с указателем дал бы то же самое, но позволил бы выразить противоречие
+// «снять и назначить одновременно»; здесь оно непредставимо.
+type DueDateUpdate struct {
+	At *time.Time
+}
+
 // RenameTaskCommand — смена заголовка.
 type RenameTaskCommand struct {
 	TaskID  string

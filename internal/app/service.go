@@ -145,6 +145,72 @@ func (s *TaskService) RenameTask(ctx context.Context, cmd RenameTaskCommand) err
 	})
 }
 
+// UpdateTask применяет частичное изменение: заданные поля меняются одной
+// записью, незаданные остаются как есть.
+//
+// Единственный сценарий, вызывающий несколько доменных методов подряд.
+// Так и задумано: мутации копятся в агрегате, поэтому либо в хранилище
+// уезжает вся команда, либо, при отказе на любом поле, ничего.
+func (s *TaskService) UpdateTask(ctx context.Context, cmd UpdateTaskCommand) error {
+	if cmd.Title == nil && cmd.Description == nil && cmd.Priority == nil && cmd.DueDate == nil {
+		return fmt.Errorf("app: update task: %w", ErrEmptyUpdate)
+	}
+
+	// Всё, что можно разобрать до похода в хранилище, разбирается здесь:
+	// негодная команда не должна стоить чтения. Исключение прежнее — срок,
+	// которому нужен тот же «сейчас», что увидит домен.
+	var (
+		title       todo.Title
+		description todo.Description
+		priority    todo.Priority
+		err         error
+	)
+	if cmd.Title != nil {
+		if title, err = todo.NewTitle(*cmd.Title); err != nil {
+			return err
+		}
+	}
+	if cmd.Description != nil {
+		if description, err = todo.NewDescription(*cmd.Description); err != nil {
+			return err
+		}
+	}
+	if cmd.Priority != nil {
+		if priority, err = todo.ParsePriority(*cmd.Priority); err != nil {
+			return err
+		}
+	}
+
+	return s.mutate(ctx, cmd.TaskID, cmd.OwnerID, func(task *todo.Task, now time.Time) error {
+		if cmd.Title != nil {
+			if err := task.Rename(title, now); err != nil {
+				return err
+			}
+		}
+		if cmd.Description != nil {
+			if err := task.Describe(description, now); err != nil {
+				return err
+			}
+		}
+		if cmd.Priority != nil {
+			if err := task.ChangePriority(priority, now); err != nil {
+				return err
+			}
+		}
+		if cmd.DueDate != nil {
+			dueDate, err := parseDueDate(cmd.DueDate.At, now)
+			if err != nil {
+				return err
+			}
+			if err := task.Reschedule(dueDate, now); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
 // DescribeTask меняет описание задачи.
 func (s *TaskService) DescribeTask(ctx context.Context, cmd DescribeTaskCommand) error {
 	description, err := todo.NewDescription(cmd.Description)

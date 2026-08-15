@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -9,6 +10,12 @@ import (
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
 )
+
+// errNilTask — вместо задачи передали nil.
+//
+// Двойник обязан пережить это ошибкой, как и настоящее хранилище: паника
+// вместо отказа — расхождение с портом, а не мелочь оформления.
+var errNilTask = errors.New("fake: task is nil")
 
 // fakeRepository — хранилище в памяти для тестов сценариев.
 //
@@ -98,6 +105,11 @@ func (r *fakeRepository) Get(ctx context.Context, id todo.TaskID) (*todo.Task, i
 
 // Save записывает задачу, соблюдая оптимистичную блокировку по версии.
 func (r *fakeRepository) Save(ctx context.Context, task *todo.Task, loadedVersion int) error {
+	// Аргумент проверяется раньше контекста: нарушение контракта остаётся
+	// нарушением независимо от того, ждёт ли ещё кто-то ответа.
+	if task == nil {
+		return errNilTask
+	}
 	// Контекст проверяется до хука: хук изображает отмену, случившуюся уже
 	// после того, как хранилище приняло запись.
 	if err := ctx.Err(); err != nil {

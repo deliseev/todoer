@@ -346,6 +346,17 @@ func taskMutations() []taskMutation {
 			},
 		},
 		{
+			// В таблице участвует с одним полем: общие проверки — про
+			// авторизацию, отмену и конфликт версий, а не про число мутаций.
+			name:  "UpdateTask",
+			event: todo.EventTaskRenamed,
+			run: func(ctx context.Context, s *app.TaskService, taskID, ownerID string) error {
+				return s.UpdateTask(ctx, app.UpdateTaskCommand{
+					TaskID: taskID, OwnerID: ownerID, Title: new("Купить кефир"),
+				})
+			},
+		},
+		{
 			name:  "DescribeTask",
 			event: todo.EventTaskDescribed,
 			run: func(ctx context.Context, s *app.TaskService, taskID, ownerID string) error {

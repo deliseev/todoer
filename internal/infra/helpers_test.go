@@ -10,9 +10,8 @@ import (
 // Опорные моменты времени. Хранилище о времени не думает — оно принимает
 // то, что уже проставил домен, — поэтому здесь достаточно констант.
 var (
-	testNow   = time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	testLater = testNow.Add(time.Hour)
-	testDue   = testNow.Add(24 * time.Hour)
+	testNow = time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	testDue = testNow.Add(24 * time.Hour)
 )
 
 // testOwner — владелец задач в тестах хранилища.
@@ -91,14 +90,4 @@ func mustDueDate(t *testing.T, at time.Time) *todo.DueDate {
 		t.Fatalf("NewDueDate(%s, %s) вернул ошибку: %v", at, testNow, err)
 	}
 	return &due
-}
-
-// mustRename переименовывает задачу или валит тест — типовая мутация,
-// которой тесты хранилища двигают версию.
-func mustRename(t *testing.T, task *todo.Task, title string, now time.Time) {
-	t.Helper()
-
-	if err := task.Rename(mustTitle(t, title), now); err != nil {
-		t.Fatalf("Rename(%q) вернул ошибку: %v", title, err)
-	}
 }

@@ -35,6 +35,12 @@ var (
 	// текстом ошибки различие оставлять нельзя.
 	ErrEventDeliveryFailed = errors.New("app: task events were not delivered")
 
+	// ErrEmptyUpdate — команда частичного изменения не несёт ни одного поля.
+	//
+	// Молча отвечать успехом на такой запрос нельзя: он ничего не изменил,
+	// а вызывающий уверен в обратном.
+	ErrEmptyUpdate = errors.New("app: update command has no fields")
+
 	// ErrMissingDependency — сервис собран без обязательной зависимости.
 	ErrMissingDependency = errors.New("app: missing dependency")
 )
