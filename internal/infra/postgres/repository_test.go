@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +115,11 @@ func TestTimeResolution(t *testing.T) {
 //
 // Порт этого не обещает: в память попадают только снимки живых агрегатов,
 // и там ветка отказа недостижима.
+//
+// Доменный сентинель при этом наружу не выпускается: по ErrUnknownStatus
+// транспорт отвечает 400, а запрос клиента был безупречен — испорчена строка
+// в базе, и починить её он не может. Такое врёт клиенту и прячет аварию от
+// того, кто следит за пятисотками.
 func TestRowWithUnknownStatusRejected(t *testing.T) {
 	t.Parallel()
 
@@ -142,8 +148,15 @@ func TestRowWithUnknownStatusRejected(t *testing.T) {
 
 	got, _, err := repo.Get(t.Context(), task.ID())
 
-	if !errors.Is(err, todo.ErrUnknownStatus) {
-		t.Errorf("Get(...) вернул ошибку %v, ожидалась ErrUnknownStatus", err)
+	if err == nil {
+		t.Fatal("Get(...) поднял задачу с неизвестным статусом")
+	}
+	if errors.Is(err, todo.ErrUnknownStatus) {
+		t.Errorf("Get(...) вернул доменный сентинель (%v): транспорт ответит по нему 400 вместо 500", err)
+	}
+	// Причина остаётся в тексте: её читают в логе, когда уже всё сломалось.
+	if !strings.Contains(err.Error(), todo.ErrUnknownStatus.Error()) {
+		t.Errorf("ошибка = %q, ожидалось упоминание причины %q", err, todo.ErrUnknownStatus)
 	}
 	if got != nil {
 		t.Error("Get(...) вернул задачу вместе с ошибкой")

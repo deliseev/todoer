@@ -127,7 +127,7 @@ func newTaskService(repo app.Repository) (*app.TaskService, error) {
 // Отмена контекста — штатное завершение, поэтому run возвращает nil.
 func run(ctx context.Context, out io.Writer, addr, dsn string) error {
 	if dsn == "" {
-		return fmt.Errorf("%s не задана", dsnEnv)
+		return fmt.Errorf("%s is not set", dsnEnv)
 	}
 
 	// База открывается прежде всего остального, и по той же причине, по
@@ -141,7 +141,14 @@ func run(ctx context.Context, out io.Writer, addr, dsn string) error {
 
 	// Миграции команда не накатывает — их двигает выкатка, — но работать на
 	// отставшей схеме нельзя: код обращался бы к колонкам, которых ещё нет.
+	//
+	// Отставшая схема отделяется от любого другого отказа при старте: ради
+	// этого postgres и экспортирует сентинель. Тому, кто читает stderr,
+	// нужно не «база не та», а что именно сделать.
 	if err := postgres.EnsureSchema(ctx, dsn); err != nil {
+		if errors.Is(err, postgres.ErrSchemaOutdated) {
+			return fmt.Errorf("start on outdated schema (apply migrations: todoer-migrate up): %w", err)
+		}
 		return err
 	}
 

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,21 +37,17 @@ const (
 	maxConnIdleTime = 5 * time.Minute
 )
 
-// parseConfig разбирает строку подключения и проставляет сроки.
+// parseConfig разбирает строку подключения и проставляет то, что общего у
+// всякого соединения с базой: срок установления и пределы пула.
 //
 // Отдельно от Open, потому что нужен обоим: и пулу боевых запросов, и
-// соединению мигратора — сроки у них общие, и расходиться им незачем.
+// соединению мигратора.
 func parseConfig(dsn string) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse connection string: %w", err)
 	}
 
-	// Сроки выставляются параметрами сессии, а не оборачиванием каждого
-	// запроса контекстом: так они действуют и на то, что запрос делает уже
-	// внутри базы, и на код, который забыли обернуть.
-	config.ConnConfig.RuntimeParams["statement_timeout"] = milliseconds(statementTimeout)
-	config.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = milliseconds(idleInTransactionTimeout)
 	config.ConnConfig.ConnectTimeout = connectTimeout
 
 	config.MaxConns = maxConns
@@ -60,10 +57,26 @@ func parseConfig(dsn string) (*pgxpool.Config, error) {
 	return config, nil
 }
 
+// limitQueries закрывает сроки самому запросу и брошенной транзакции.
+//
+// Проставляется только боевому пулу, но не мигратору, и это не мелочь:
+// миграция законно идёт долго — индекс на большой таблице строится минутами, —
+// а statement_timeout оборвал бы её на середине сообщением «canceling
+// statement due to statement timeout». У боевого запроса такого права нет:
+// неудачный план иначе выполняется, пока кто-нибудь не заметит.
+//
+// Сроки выставляются параметрами сессии, а не оборачиванием каждого запроса
+// контекстом: так они действуют и на то, что запрос делает уже внутри базы,
+// и на код, который забыли обернуть.
+func limitQueries(config *pgxpool.Config) {
+	config.ConnConfig.RuntimeParams["statement_timeout"] = milliseconds(statementTimeout)
+	config.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = milliseconds(idleInTransactionTimeout)
+}
+
 // milliseconds переводит срок в строку миллисекунд: Postgres ждёт параметры
 // сессии строками.
 func milliseconds(d time.Duration) string {
-	return fmt.Sprintf("%d", d.Milliseconds())
+	return strconv.FormatInt(d.Milliseconds(), 10)
 }
 
 // Open создаёт пул соединений и убеждается, что база отвечает.
@@ -77,6 +90,7 @@ func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
+	limitQueries(config)
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

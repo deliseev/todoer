@@ -102,30 +102,34 @@ func (r taskRow) args() pgx.StrictNamedArgs {
 // доверять ей на слово хранилище не вправе. Исключение одно, и оно доменное:
 // срок восстанавливается через ReconstituteDueDate, потому что его инвариант
 // задан относительно «сейчас» и кругового пути через базу не переживает.
+//
+// Отказ фабрики становится errCorruptRow, а сама доменная ошибка уезжает
+// подробностью в скобках: по ней транспорт отвечал бы 400, а испорчен здесь
+// не запрос клиента, а строка в базе. Подробности см. в errors.go.
 func (r taskRow) snapshot() (todo.TaskSnapshot, error) {
 	id, err := todo.ParseTaskID(r.ID)
 	if err != nil {
-		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task id: %w", err)
+		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task id (%v): %w", err, errCorruptRow)
 	}
 	ownerID, err := todo.ParseOwnerID(r.OwnerID)
 	if err != nil {
-		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s owner: %w", r.ID, err)
+		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s owner (%v): %w", r.ID, err, errCorruptRow)
 	}
 	title, err := todo.NewTitle(r.Title)
 	if err != nil {
-		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s title: %w", r.ID, err)
+		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s title (%v): %w", r.ID, err, errCorruptRow)
 	}
 	description, err := todo.NewDescription(r.Description)
 	if err != nil {
-		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s description: %w", r.ID, err)
+		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s description (%v): %w", r.ID, err, errCorruptRow)
 	}
 	status, err := todo.ParseStatus(r.Status)
 	if err != nil {
-		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s status: %w", r.ID, err)
+		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s status (%v): %w", r.ID, err, errCorruptRow)
 	}
 	priority, err := todo.ParsePriority(r.Priority)
 	if err != nil {
-		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s priority: %w", r.ID, err)
+		return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s priority (%v): %w", r.ID, err, errCorruptRow)
 	}
 
 	snapshot := todo.TaskSnapshot{
@@ -146,7 +150,7 @@ func (r taskRow) snapshot() (todo.TaskSnapshot, error) {
 	if r.DueDate != nil {
 		dueDate, err := todo.ReconstituteDueDate(*r.DueDate)
 		if err != nil {
-			return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s due date: %w", r.ID, err)
+			return todo.TaskSnapshot{}, fmt.Errorf("postgres: read task %s due date (%v): %w", r.ID, err, errCorruptRow)
 		}
 		snapshot.DueDate = &dueDate
 	}

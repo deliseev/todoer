@@ -56,7 +56,7 @@ func run(ctx context.Context, out io.Writer, args []string, dsn string) error {
 	// Проверяется до разбора команды: без базы не выполнима ни одна из них,
 	// и сказать об этом лучше раньше, чем после разбора аргументов.
 	if dsn == "" {
-		return fmt.Errorf("%s не задана", dsnEnv)
+		return fmt.Errorf("%s is not set", dsnEnv)
 	}
 
 	switch args[0] {
@@ -76,7 +76,7 @@ func run(ctx context.Context, out io.Writer, args []string, dsn string) error {
 		return printStatus(ctx, out, dsn)
 
 	default:
-		return fmt.Errorf("неизвестная команда %q: %w", args[0], errUsage)
+		return fmt.Errorf("unknown command %q: %w", args[0], errUsage)
 	}
 }
 

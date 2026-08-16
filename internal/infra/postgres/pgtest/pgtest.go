@@ -62,6 +62,12 @@ func Run(m *testing.M) {
 	templateName = uniqueName("todoer_tmpl")
 
 	if err := createTemplate(); err != nil {
+		// База могла быть уже создана, а споткнуться накат миграций: уйти,
+		// не убрав её, значит оставить мусор на сервере до конца дней —
+		// имя несёт номер процесса и второй раз само не встретится.
+		if dropErr := dropDatabase(context.Background(), templateName); dropErr != nil {
+			fmt.Fprintln(os.Stderr, "pgtest: удаление недоделанного шаблона:", dropErr)
+		}
 		fmt.Fprintln(os.Stderr, "pgtest: подготовка шаблонной базы:", err)
 		os.Exit(1)
 	}

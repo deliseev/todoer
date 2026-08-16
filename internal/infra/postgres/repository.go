@@ -88,7 +88,7 @@ func (r *TaskRepository) Get(ctx context.Context, taskID todo.TaskID) (*todo.Tas
 	// куда попадают только снимки живых агрегатов.
 	task, err := todo.ReconstituteTask(snapshot)
 	if err != nil {
-		return nil, 0, fmt.Errorf("postgres: reconstitute task %s: %w", taskID, err)
+		return nil, 0, fmt.Errorf("postgres: reconstitute task %s (%v): %w", taskID, err, errCorruptRow)
 	}
 
 	return task, snapshot.Version, nil
