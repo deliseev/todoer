@@ -10,7 +10,16 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/deliseev/todoer/internal/infra"
+	"github.com/deliseev/todoer/internal/infra/postgres/pgtest"
 )
+
+// TestMain готовит шаблонную базу: сборка целиком проверяется на настоящем
+// хранилище, а не на памяти.
+func TestMain(m *testing.M) {
+	pgtest.Run(m)
+}
 
 func TestNewTaskService(t *testing.T) {
 	t.Parallel()
@@ -18,12 +27,34 @@ func TestNewTaskService(t *testing.T) {
 	t.Run("боевые реализации подходят портам", func(t *testing.T) {
 		t.Parallel()
 
-		service, err := newTaskService()
+		// Хранилище здесь в памяти намеренно: проверяется сборка сервиса из
+		// портов, а не то, чем подставлен один из них.
+		service, err := newTaskService(infra.NewInMemoryTaskRepository())
 		if err != nil {
 			t.Fatalf("newTaskService() вернул ошибку: %v", err)
 		}
 		if service == nil {
 			t.Fatal("newTaskService() вернул nil без ошибки")
+		}
+	})
+}
+
+func TestDatabaseURL(t *testing.T) {
+	// Без t.Parallel: подтесты правят окружение процесса.
+
+	t.Run("умолчания нет", func(t *testing.T) {
+		t.Setenv(dsnEnv, "")
+
+		if got := databaseURL(); got != "" {
+			t.Errorf("databaseURL() = %q, ожидалась пустая строка", got)
+		}
+	})
+
+	t.Run("из окружения", func(t *testing.T) {
+		t.Setenv(dsnEnv, " postgres://localhost/todoer ")
+
+		if got := databaseURL(); got != "postgres://localhost/todoer" {
+			t.Errorf("databaseURL() = %q, ожидался адрес без пробелов", got)
 		}
 	})
 }
@@ -108,14 +139,16 @@ func TestRun(t *testing.T) {
 	t.Run("собранное приложение обслуживает запросы", func(t *testing.T) {
 		t.Parallel()
 
+		dsn := pgtest.NewDSN(t)
+
 		// Проверяется вся сборка целиком: транспорт поверх сценариев поверх
-		// хранилища в памяти. Задача создаётся и тут же читается обратно —
-		// значит слои соединены, а не просто скомпилировались.
+		// настоящей базы. Задача создаётся и тут же читается обратно — значит
+		// слои соединены, а не просто скомпилировались.
 		out := &syncBuffer{}
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 
-		go func() { done <- run(ctx, out, "127.0.0.1:0") }()
+		go func() { done <- run(ctx, out, "127.0.0.1:0", dsn) }()
 
 		addr := waitAddr(t, out)
 
@@ -148,6 +181,8 @@ func TestRun(t *testing.T) {
 	t.Run("занятый адрес — ошибка, а не паника", func(t *testing.T) {
 		t.Parallel()
 
+		dsn := pgtest.NewDSN(t)
+
 		busy, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatalf("net.Listen(...) вернул ошибку: %v", err)
@@ -156,13 +191,99 @@ func TestRun(t *testing.T) {
 
 		var out bytes.Buffer
 
-		if err := run(t.Context(), &out, busy.Addr().String()); err == nil {
+		if err := run(t.Context(), &out, busy.Addr().String(), dsn); err == nil {
 			t.Fatal("run(...) на занятом адресе вернул nil")
 		}
 		if out.Len() != 0 {
 			t.Errorf("несостоявшийся запуск что-то напечатал:\n%s", out.String())
 		}
 	})
+
+	t.Run("без строки подключения — отказ запуска", func(t *testing.T) {
+		t.Parallel()
+
+		// Подстановка хранилища в памяти при пустой переменной означала бы
+		// приложение, которое «работает» ровно до первого перезапуска.
+		var out bytes.Buffer
+
+		err := run(t.Context(), &out, "127.0.0.1:0", "")
+		if err == nil {
+			t.Fatal("run(...) без строки подключения вернул nil")
+		}
+		if !strings.Contains(err.Error(), dsnEnv) {
+			t.Errorf("ошибка = %q, ожидалось упоминание %s", err, dsnEnv)
+		}
+	})
+
+	t.Run("задача переживает перезапуск", func(t *testing.T) {
+		t.Parallel()
+
+		// То, ради чего пункт затевался: хранилище в памяти этот подтест
+		// не прошло бы никогда.
+		dsn := pgtest.NewDSN(t)
+
+		location := createTask(t, dsn)
+		read := readTask(t, dsn, location)
+
+		if read.StatusCode != http.StatusOK {
+			t.Fatalf("код ответа на чтение после перезапуска = %d, ожидался %d",
+				read.StatusCode, http.StatusOK)
+		}
+	})
+}
+
+// createTask поднимает сервер, создаёт задачу и останавливает сервер,
+// возвращая путь созданной задачи.
+func createTask(t *testing.T, dsn string) string {
+	t.Helper()
+
+	addr, stop := start(t, dsn)
+
+	created := do(t, request(t, http.MethodPost, "http://"+addr+"/tasks",
+		`{"title":"Купить молоко","priority":"high"}`))
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("код ответа на создание = %d, ожидался %d", created.StatusCode, http.StatusCreated)
+	}
+
+	location := created.Header.Get("Location")
+	if location == "" {
+		t.Fatal("в ответе на создание нет Location")
+	}
+
+	stop()
+
+	return location
+}
+
+// readTask поднимает сервер заново на той же базе и читает задачу.
+func readTask(t *testing.T, dsn, location string) *http.Response {
+	t.Helper()
+
+	addr, stop := start(t, dsn)
+	defer stop()
+
+	return do(t, request(t, http.MethodGet, "http://"+addr+location, ""))
+}
+
+// start поднимает сервер и возвращает его адрес вместе с остановкой.
+//
+// Остановка ждёт завершения run: без этого следующий запуск начал бы работать
+// с базой, пока предыдущий ещё её закрывает.
+func start(t *testing.T, dsn string) (addr string, stop func()) {
+	t.Helper()
+
+	out := &syncBuffer{}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+
+	go func() { done <- run(ctx, out, "127.0.0.1:0", dsn) }()
+
+	return waitAddr(t, out), func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("run(...) вернул ошибку: %v", err)
+		}
+	}
 }
 
 // syncBuffer — вывод, в который пишет сервер, а читает тест.

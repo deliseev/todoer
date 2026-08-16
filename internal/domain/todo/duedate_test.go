@@ -137,6 +137,84 @@ func TestNewDueDateComparesInstants(t *testing.T) {
 	}
 }
 
+func TestReconstituteDueDate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		at      time.Time
+		wantErr error
+	}{
+		{
+			name: "срок в будущем восстанавливается",
+			at:   testNow.Add(24 * time.Hour),
+		},
+		{
+			// Ради этого случая восстановление и существует: просроченная
+			// задача законно лежит в хранилище и обязана оттуда подняться.
+			name: "просроченный срок восстанавливается",
+			at:   testNow.Add(-24 * time.Hour),
+		},
+		{
+			name:    "нулевое время отвергается",
+			at:      time.Time{},
+			wantErr: todo.ErrInvalidDueDate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := todo.ReconstituteDueDate(tt.at)
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ReconstituteDueDate(...) вернул ошибку %v, ожидалась %v", err, tt.wantErr)
+				}
+				if !got.IsZero() {
+					t.Error("ReconstituteDueDate(...) при ошибке вернул непустой срок")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ReconstituteDueDate(...) вернул неожиданную ошибку: %v", err)
+			}
+			if !got.Time().Equal(tt.at) {
+				t.Errorf("DueDate.Time() = %s, ожидалось %s", got.Time(), tt.at)
+			}
+		})
+	}
+}
+
+func TestReconstituteDueDateNormalizedToUTC(t *testing.T) {
+	t.Parallel()
+
+	// Хранилище отдаёт момент в своей зоне — Postgres, например, в зоне
+	// сессии. Восстановленный срок обязан быть равен созданному в UTC как
+	// значение, иначе сравнение сроков начнёт зависеть от настроек базы.
+	msk := time.FixedZone("MSK", 3*60*60)
+	at := testNow.Add(24 * time.Hour)
+
+	restored, err := todo.ReconstituteDueDate(at.In(msk))
+	if err != nil {
+		t.Fatalf("ReconstituteDueDate(...) вернул ошибку: %v", err)
+	}
+
+	if loc := restored.Time().Location(); loc != time.UTC {
+		t.Errorf("DueDate.Time().Location() = %s, ожидалось UTC", loc)
+	}
+
+	created, err := todo.NewDueDate(at, testNow)
+	if err != nil {
+		t.Fatalf("NewDueDate(...) вернул ошибку: %v", err)
+	}
+	if restored != created {
+		t.Error("восстановленный и созданный сроки для одной точки времени должны быть равны")
+	}
+}
+
 func TestDueDateIsBefore(t *testing.T) {
 	t.Parallel()
 

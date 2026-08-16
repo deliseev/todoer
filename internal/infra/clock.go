@@ -7,10 +7,20 @@ package infra
 
 import "time"
 
+// storageResolution — разрешающая способность моментов времени в хранилище.
+//
+// timestamptz в Postgres хранит микросекунды. Часы, отдающие наносекунды,
+// сделали бы круговой путь через базу нетождественным: записали один момент,
+// прочитали другой, и сравнение через Equal перестало бы сходиться там, где
+// домен вправе ждать равенства. Часы и хранилище — обе инфраструктура, и
+// договориться о точности они обязаны между собой, не перекладывая разницу
+// на домен.
+const storageResolution = time.Microsecond
+
 // SystemClock — реализация app.Clock поверх системных часов.
 type SystemClock struct{}
 
-// Now возвращает текущее время в UTC.
+// Now возвращает текущее время в UTC, усечённое до точности хранилища.
 func (SystemClock) Now() time.Time {
-	return time.Now().UTC()
+	return time.Now().UTC().Truncate(storageResolution)
 }

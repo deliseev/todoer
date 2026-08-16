@@ -24,6 +24,8 @@ var (
 
 	// ErrDueDateInPast — срок выполнения не наступает в будущем.
 	ErrDueDateInPast = errors.New("todo: due date is in the past")
+	// ErrInvalidDueDate — срок не описывает момент времени.
+	ErrInvalidDueDate = errors.New("todo: invalid due date")
 
 	// ErrUnknownPriority — строка не соответствует ни одному приоритету.
 	ErrUnknownPriority = errors.New("todo: unknown priority")

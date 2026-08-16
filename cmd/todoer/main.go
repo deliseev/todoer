@@ -5,8 +5,8 @@
 // ниже про эту сборку не знает и знать не должен.
 //
 // Команда поднимает HTTP-сервер и работает, пока её не остановят: отменой
-// контекста или сигналом. Хранилище пока в памяти, поэтому остановка стирает
-// все задачи — это учебная сборка, а не эксплуатация.
+// контекста или сигналом. Задачи хранятся в Postgres, поэтому остановка их
+// не стирает; схему двигает отдельная команда todoer-migrate.
 package main
 
 import (
@@ -24,6 +24,7 @@ import (
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/infra"
+	"github.com/deliseev/todoer/internal/infra/postgres"
 	"github.com/deliseev/todoer/internal/transport/httpapi"
 )
 
@@ -33,6 +34,11 @@ const (
 	// разработчика не повод править исходники.
 	addrEnv     = "TODOER_ADDR"
 	defaultAddr = ":8080"
+
+	// dsnEnv — переменная окружения со строкой подключения к базе. Умолчания
+	// у неё нет и быть не должно: адрес базы — это то, чего нельзя угадать,
+	// а угаданный неверно он молча уведёт запись не туда.
+	dsnEnv = "TODOER_DATABASE_URL"
 
 	// Таймауты сервера. Нулевой таймаут у http.Server значит «ждать вечно»,
 	// а вечно ждущее соединение — самый дешёвый отказ в обслуживании из
@@ -65,7 +71,7 @@ func main() {
 
 	restoreSignalsOnCancel(ctx, stop)
 
-	if err := run(ctx, os.Stdout, listenAddr()); err != nil {
+	if err := run(ctx, os.Stdout, listenAddr(), databaseURL()); err != nil {
 		fmt.Fprintln(os.Stderr, "todoer:", err)
 		os.Exit(1)
 	}
@@ -96,13 +102,19 @@ func listenAddr() string {
 	return defaultAddr
 }
 
+// databaseURL читает строку подключения из окружения.
+// Пустая переменная равна отсутствующей: пробелы — не адрес.
+func databaseURL() string {
+	return strings.TrimSpace(os.Getenv(dsnEnv))
+}
+
 // newTaskService собирает сервис на боевых реализациях портов.
 //
 // Публикатор заглушечный: шины событий ещё нет, а nil вместо него запрещён
 // конструктором — это тихая потеря событий.
-func newTaskService() (*app.TaskService, error) {
+func newTaskService(repo app.Repository) (*app.TaskService, error) {
 	return app.NewTaskService(
-		infra.NewInMemoryTaskRepository(),
+		repo,
 		infra.NopPublisher{},
 		infra.SystemClock{},
 	)
@@ -110,11 +122,30 @@ func newTaskService() (*app.TaskService, error) {
 
 // run поднимает сервер на addr и обслуживает запросы, пока не отменят ctx.
 //
-// Отделён от main, чтобы его мог водить тест: адрес приезжает параметром,
-// а не из окружения, вывод — в out, а не в os.Stdout. Отмена контекста —
-// штатное завершение, поэтому run возвращает nil, а не ошибку.
-func run(ctx context.Context, out io.Writer, addr string) error {
-	service, err := newTaskService()
+// Отделён от main, чтобы его мог водить тест: адрес и строка подключения
+// приезжают параметрами, а не из окружения, вывод — в out, а не в os.Stdout.
+// Отмена контекста — штатное завершение, поэтому run возвращает nil.
+func run(ctx context.Context, out io.Writer, addr, dsn string) error {
+	if dsn == "" {
+		return fmt.Errorf("%s не задана", dsnEnv)
+	}
+
+	// База открывается прежде всего остального, и по той же причине, по
+	// которой слушатель открывается до Serve: недоступная база должна быть
+	// ошибкой запуска, а не потоком пятисоток по каждому запросу.
+	pool, err := postgres.Open(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	// Миграции команда не накатывает — их двигает выкатка, — но работать на
+	// отставшей схеме нельзя: код обращался бы к колонкам, которых ещё нет.
+	if err := postgres.EnsureSchema(ctx, dsn); err != nil {
+		return err
+	}
+
+	service, err := newTaskService(postgres.NewTaskRepository(pool))
 	if err != nil {
 		return fmt.Errorf("build task service: %w", err)
 	}

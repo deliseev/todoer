@@ -1,0 +1,39 @@
+# База для разработки и для CI — один и тот же файл.
+#
+# Разработка ведётся на хосте: в докере живёт только Postgres, приложение и
+# тесты запускаются обычным `go run` и `go test`. CI поднимает базу этим же
+# файлом — второе описание базы рядом с первым разошлось бы с ним так же
+# незаметно, как разошлись бы два списка проверок.
+
+services:
+  db:
+    # Тег с явной версией: «latest» превращает прогон в лотерею, а разницу
+    # между мажорными версиями Postgres видно далеко не сразу.
+    image: postgres:17-alpine
+
+    environment:
+      POSTGRES_USER: todoer
+      POSTGRES_PASSWORD: todoer
+      POSTGRES_DB: todoer
+
+    # Порт переопределяется переменной: на машине разработчика 5432 уже может
+    # быть занят своим Postgres, и это не повод править файл, общий с CI.
+    ports:
+      - "${TODOER_DB_PORT:-5432}:5432"
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    # Без healthcheck `docker compose up -d` возвращает управление, как только
+    # контейнер запущен, — а Postgres в этот момент ещё поднимается. С ним
+    # `up -d --wait` ждёт готовности, и первый же тест не падает на отказе
+    # соединения.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todoer -d todoer"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  pgdata:

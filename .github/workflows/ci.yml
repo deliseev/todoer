@@ -21,6 +21,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    env:
+      # Адрес базы один и тот же для приложения и для тестов, но переменные
+      # разные: тесты создают и удаляют базы целиком, и подставить им рабочую
+      # базу по ошибке не должно быть возможно одной опечаткой.
+      TODOER_DATABASE_URL: postgres://todoer:todoer@localhost:5432/todoer?sslmode=disable
+      TODOER_TEST_DATABASE_URL: postgres://todoer:todoer@localhost:5432/todoer?sslmode=disable
+
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +48,22 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # База поднимается тем же файлом, что и на машине разработчика: второе
+      # описание базы рядом с первым разошлось бы с ним так же незаметно, как
+      # разошлись бы два списка проверок. --wait ждёт healthcheck, иначе первый
+      # же тест упрётся в ещё не поднявшийся Postgres.
+      - name: docker compose up
+        run: docker compose up -d --wait db
+
+      # Отдельным шагом, а не через оснастку тестов: схему в бою двигает
+      # выкатка, и этот путь обязан проверяться сам по себе.
+      - name: миграции
+        run: go run ./cmd/todoer-migrate up
+
       # -race и -count=1 обязательны: гонки этот код уже ловил, а кэш тестов
       # в CI превратил бы прогон в проверку того, что ничего не изменилось.
+      # TODOER_TEST_DATABASE_URL выставлена, поэтому интеграционные тесты здесь
+      # не пропускаются, а падают, если базы не окажется: зелёная сборка,
+      # ничего не проверившая, хуже красной.
       - name: go test -race
         run: go test ./... -race -count=1
