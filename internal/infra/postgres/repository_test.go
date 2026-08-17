@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 	"github.com/deliseev/todoer/internal/infra"
 	"github.com/deliseev/todoer/internal/infra/postgres"
 	"github.com/deliseev/todoer/internal/infra/postgres/pgtest"
@@ -15,6 +16,10 @@ import (
 // Опорный момент. Хранилище о времени не думает — оно принимает то, что уже
 // проставил домен, — поэтому здесь достаточно констант.
 var testNow = time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+
+// testOwner — владелец задач в тестах хранилища. Хранилище владельцев не
+// различает: авторизация живёт в сценарии, а не на этой границе.
+const testOwner = "user-42"
 
 // TestOverdueTaskIsRestored: задача с просроченным сроком законно лежит в базе
 // и обязана оттуда подняться.
@@ -28,11 +33,11 @@ func TestOverdueTaskIsRestored(t *testing.T) {
 
 	repo := newRepository(t)
 
-	overdue := mustReconstituteDueDate(t, testNow.Add(-30*24*time.Hour))
+	overdue := todotest.MustReconstituteDueDate(t, testNow.Add(-30*24*time.Hour))
 	snapshot := todo.TaskSnapshot{
-		ID:        mustTaskID(t),
-		OwnerID:   mustOwnerID(t, "user-42"),
-		Title:     mustTitle(t, "Сдать отчёт"),
+		ID:        todotest.MustTaskID(t),
+		OwnerID:   todotest.MustOwnerID(t, testOwner),
+		Title:     todotest.MustTitle(t, "Сдать отчёт"),
 		Status:    todo.StatusPending,
 		Priority:  todo.PriorityHigh,
 		DueDate:   &overdue,
@@ -81,7 +86,7 @@ func TestTimeResolution(t *testing.T) {
 
 		now := infra.SystemClock{}.Now()
 
-		got := saveAndGet(t, newTaskAt(t, now))
+		got := saveAndGet(t, todotest.NewTask(t, testOwner, now))
 
 		if !got.CreatedAt().Equal(now) {
 			t.Errorf("createdAt = %s, ожидалось %s",
@@ -97,7 +102,7 @@ func TestTimeResolution(t *testing.T) {
 		// равно», а другое значение.
 		now := time.Date(2026, time.August, 13, 12, 0, 0, 123456789, time.UTC)
 
-		got := saveAndGet(t, newTaskAt(t, now))
+		got := saveAndGet(t, todotest.NewTask(t, testOwner, now))
 
 		if got.CreatedAt().Equal(now) {
 			t.Fatalf("createdAt = %s: база сохранила наносекунды, чего timestamptz не умеет",
@@ -132,7 +137,7 @@ func TestRowWithUnknownStatusRejected(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	repo := postgres.NewTaskRepository(pool)
-	task := newTaskAt(t, testNow)
+	task := todotest.NewTask(t, testOwner, testNow)
 
 	if err := repo.Save(t.Context(), task, 0); err != nil {
 		t.Fatalf("Save(...) вернул ошибку: %v", err)
@@ -292,69 +297,4 @@ func saveAndGet(t *testing.T, task *todo.Task) *todo.Task {
 	}
 
 	return got
-}
-
-// newTaskAt создаёт задачу, созданную в момент now.
-func newTaskAt(t *testing.T, now time.Time) *todo.Task {
-	t.Helper()
-
-	dueDate, err := todo.NewDueDate(now.Add(24*time.Hour), now)
-	if err != nil {
-		t.Fatalf("NewDueDate(...) вернул ошибку: %v", err)
-	}
-
-	task, err := todo.NewTask(
-		mustTaskID(t),
-		mustOwnerID(t, "user-42"),
-		mustTitle(t, "Купить молоко"),
-		todo.Description{},
-		todo.PriorityNormal,
-		&dueDate,
-		now,
-	)
-	if err != nil {
-		t.Fatalf("NewTask(...) вернул ошибку: %v", err)
-	}
-
-	return task
-}
-
-func mustTaskID(t *testing.T) todo.TaskID {
-	t.Helper()
-
-	id, err := todo.NewTaskID()
-	if err != nil {
-		t.Fatalf("NewTaskID() вернул ошибку: %v", err)
-	}
-	return id
-}
-
-func mustOwnerID(t *testing.T, s string) todo.OwnerID {
-	t.Helper()
-
-	owner, err := todo.ParseOwnerID(s)
-	if err != nil {
-		t.Fatalf("ParseOwnerID(%q) вернул ошибку: %v", s, err)
-	}
-	return owner
-}
-
-func mustTitle(t *testing.T, s string) todo.Title {
-	t.Helper()
-
-	title, err := todo.NewTitle(s)
-	if err != nil {
-		t.Fatalf("NewTitle(%q) вернул ошибку: %v", s, err)
-	}
-	return title
-}
-
-func mustReconstituteDueDate(t *testing.T, at time.Time) todo.DueDate {
-	t.Helper()
-
-	dueDate, err := todo.ReconstituteDueDate(at)
-	if err != nil {
-		t.Fatalf("ReconstituteDueDate(%s) вернул ошибку: %v", at, err)
-	}
-	return dueDate
 }

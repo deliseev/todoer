@@ -7,6 +7,7 @@ import (
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 func TestGetTask(t *testing.T) {
@@ -105,7 +106,7 @@ func TestGetTask(t *testing.T) {
 		env := newTestEnv(t)
 
 		_, err := env.service.GetTask(t.Context(), app.GetTaskQuery{
-			TaskID: mustTaskID(t).String(), OwnerID: testOwner,
+			TaskID: todotest.MustTaskID(t).String(), OwnerID: testOwner,
 		})
 		if !errors.Is(err, app.ErrTaskNotFound) {
 			t.Fatalf("ожидалась ErrTaskNotFound, получено: %v", err)
@@ -125,7 +126,7 @@ func TestGetTask(t *testing.T) {
 			},
 			{
 				name:    "пустой владелец",
-				query:   app.GetTaskQuery{TaskID: mustTaskID(t).String(), OwnerID: "  "},
+				query:   app.GetTaskQuery{TaskID: todotest.MustTaskID(t).String(), OwnerID: "  "},
 				wantErr: todo.ErrInvalidOwnerID,
 			},
 		}

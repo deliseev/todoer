@@ -9,6 +9,7 @@ import (
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 // errNilTask — вместо задачи передали nil.
@@ -235,7 +236,7 @@ func (p *recordingPublisher) published() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return eventNames(p.events)
+	return todotest.EventNames(p.events)
 }
 
 // eventAt возвращает опубликованное событие по его порядковому номеру.

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 // Моменты времени, которыми пользуются тесты агрегата.
@@ -32,12 +33,12 @@ func validTaskArgs(t *testing.T) taskArgs {
 	t.Helper()
 
 	return taskArgs{
-		id:          mustTaskID(t),
-		ownerID:     mustOwnerID(t, "user-42"),
-		title:       mustTitle(t, "Купить молоко"),
-		description: mustDescription(t, "Два литра, в магазине у дома"),
+		id:          todotest.MustTaskID(t),
+		ownerID:     todotest.MustOwnerID(t, "user-42"),
+		title:       todotest.MustTitle(t, "Купить молоко"),
+		description: todotest.MustDescription(t, "Два литра, в магазине у дома"),
 		priority:    todo.PriorityHigh,
-		dueDate:     mustDueDate(t, testTomorrowAt),
+		dueDate:     todotest.MustDueDate(t, testTomorrowAt, testNow),
 	}
 }
 
@@ -170,7 +171,7 @@ func TestNewTaskRejectsStaleDueDate(t *testing.T) {
 	// задачи уже прошёл. Reschedule такое отвергает — конструктор обязан
 	// вести себя так же, иначе одно правило соблюдается через раз.
 	args := validTaskArgs(t)
-	args.dueDate = mustDueDate(t, testLater)
+	args.dueDate = todotest.MustDueDate(t, testLater, testNow)
 
 	task, err := args.newTask(testMuchLater)
 	if !errors.Is(err, todo.ErrDueDateInPast) {
@@ -322,7 +323,7 @@ func TestTaskRename(t *testing.T) {
 	t.Parallel()
 
 	task := newTestTask(t)
-	newTitle := mustTitle(t, "Купить кефир")
+	newTitle := todotest.MustTitle(t, "Купить кефир")
 
 	if err := task.Rename(newTitle, testLater); err != nil {
 		t.Fatalf("Task.Rename(...) вернул ошибку: %v", err)
@@ -358,13 +359,13 @@ func fieldMutations() []mutation {
 		{
 			name: "переименование",
 			apply: func(t *testing.T, task *todo.Task, now time.Time) error {
-				return task.Rename(mustTitle(t, "Купить кефир"), now)
+				return task.Rename(todotest.MustTitle(t, "Купить кефир"), now)
 			},
 		},
 		{
 			name: "смена описания",
 			apply: func(t *testing.T, task *todo.Task, now time.Time) error {
-				return task.Describe(mustDescription(t, "Лучше взять два по литру"), now)
+				return task.Describe(todotest.MustDescription(t, "Лучше взять два по литру"), now)
 			},
 		},
 		{
@@ -455,7 +456,7 @@ func TestTaskMutationsWithSameValueChangeNothing(t *testing.T) {
 		t.Run(mut.name, func(t *testing.T) {
 			t.Parallel()
 
-			task := newTestTaskWithDueDate(t, mustDueDate(t, testNow.Add(24*time.Hour)))
+			task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testNow.Add(24*time.Hour), testNow))
 			// События создания забираем заранее: смотреть надо только на то,
 			// что породил повтор.
 			task.PullEvents()
@@ -474,7 +475,7 @@ func TestTaskMutationsWithSameValueChangeNothing(t *testing.T) {
 				t.Errorf("updatedAt = %s, ожидалось %s", got, wantUpdatedAt)
 			}
 			if events := task.PullEvents(); len(events) != 0 {
-				t.Errorf("события = %v, ожидалось пусто", eventNames(events))
+				t.Errorf("события = %v, ожидалось пусто", todotest.EventNames(events))
 			}
 		})
 	}
@@ -500,7 +501,7 @@ func TestTaskMutationsWithSameValueChangeNothing(t *testing.T) {
 			t.Errorf("updatedAt = %s, ожидалось %s", got, wantUpdatedAt)
 		}
 		if events := task.PullEvents(); len(events) != 0 {
-			t.Errorf("события = %v, ожидалось пусто", eventNames(events))
+			t.Errorf("события = %v, ожидалось пусто", todotest.EventNames(events))
 		}
 	})
 }
@@ -512,7 +513,7 @@ func TestRescheduleToOwnOverdueDate(t *testing.T) {
 	// отдаёт срок наружу — значит клиент, вернувший прочитанную форму целиком,
 	// пришлёт его обратно. Это повтор, а не назначение, и требовать от него
 	// будущего нельзя: иначе просроченную задачу не переименовать.
-	task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+	task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow))
 	task.PullEvents()
 
 	wantVersion := task.Version()
@@ -537,14 +538,14 @@ func TestRescheduleToOwnOverdueDate(t *testing.T) {
 			t.Errorf("updatedAt = %s, ожидалось %s", got, wantUpdatedAt)
 		}
 		if events := task.PullEvents(); len(events) != 0 {
-			t.Errorf("события = %v, ожидалось пусто", eventNames(events))
+			t.Errorf("события = %v, ожидалось пусто", todotest.EventNames(events))
 		}
 	})
 
 	t.Run("чужой просроченный срок по-прежнему отвергается", func(t *testing.T) {
 		// Послабление касается только повтора: назначить другой срок в прошлом
 		// нельзя, иначе проверка перестала бы существовать.
-		other := mustDueDate(t, testNow.Add(2*time.Hour))
+		other := todotest.MustDueDate(t, testNow.Add(2*time.Hour), testNow)
 
 		if err := task.Reschedule(other, overdueNow); !errors.Is(err, todo.ErrDueDateInPast) {
 			t.Fatalf("ожидалась ErrDueDateInPast, получено: %v", err)
@@ -688,7 +689,7 @@ func TestTaskDescribe(t *testing.T) {
 	t.Parallel()
 
 	task := newTestTask(t)
-	newDescription := mustDescription(t, "Лучше взять два по литру")
+	newDescription := todotest.MustDescription(t, "Лучше взять два по литру")
 
 	if err := task.Describe(newDescription, testLater); err != nil {
 		t.Fatalf("Task.Describe(...) вернул ошибку: %v", err)
@@ -730,7 +731,7 @@ func TestTaskReschedule(t *testing.T) {
 	t.Parallel()
 
 	task := newTestTask(t)
-	due := mustDueDate(t, testTomorrowAt)
+	due := todotest.MustDueDate(t, testTomorrowAt, testNow)
 
 	if err := task.Reschedule(due, testLater); err != nil {
 		t.Fatalf("Task.Reschedule(...) вернул ошибку: %v", err)
@@ -748,7 +749,7 @@ func TestTaskReschedule(t *testing.T) {
 func TestTaskRescheduleClearsDueDate(t *testing.T) {
 	t.Parallel()
 
-	task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+	task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow))
 
 	if err := task.Reschedule(nil, testLater); err != nil {
 		t.Fatalf("Task.Reschedule(nil, ...) вернул ошибку: %v", err)
@@ -768,7 +769,7 @@ func TestTaskRescheduleIntoPast(t *testing.T) {
 
 	// Срок был корректен в момент testNow, но к testMuchLater уже протух:
 	// значимый объект проверяли один раз, а агрегат обязан проверить снова.
-	stale := mustDueDate(t, testLater)
+	stale := todotest.MustDueDate(t, testLater, testNow)
 
 	if err := task.Reschedule(stale, testMuchLater); !errors.Is(err, todo.ErrDueDateInPast) {
 		t.Fatalf("Task.Reschedule(...) вернул ошибку %v, ожидалась ErrDueDateInPast", err)
@@ -799,32 +800,32 @@ func TestTaskIsOverdue(t *testing.T) {
 		},
 		{
 			name:    "срок ещё не наступил",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testTomorrowAt) },
+			dueDate: func(t *testing.T) *todo.DueDate { return todotest.MustDueDate(t, testTomorrowAt, testNow) },
 			at:      testLater,
 			want:    false,
 		},
 		{
 			name:    "момент ровно в срок просрочкой не считается",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testTomorrowAt) },
+			dueDate: func(t *testing.T) *todo.DueDate { return todotest.MustDueDate(t, testTomorrowAt, testNow) },
 			at:      testTomorrowAt,
 			want:    false,
 		},
 		{
 			name:    "срок истёк",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testLater) },
+			dueDate: func(t *testing.T) *todo.DueDate { return todotest.MustDueDate(t, testLater, testNow) },
 			at:      testMuchLater,
 			want:    true,
 		},
 		{
 			name:    "выполненная задача не бывает просроченной",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testLater) },
+			dueDate: func(t *testing.T) *todo.DueDate { return todotest.MustDueDate(t, testLater, testNow) },
 			close:   completeTask,
 			at:      testEvenLater,
 			want:    false,
 		},
 		{
 			name:    "отменённая задача не бывает просроченной",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testLater) },
+			dueDate: func(t *testing.T) *todo.DueDate { return todotest.MustDueDate(t, testLater, testNow) },
 			close:   cancelTask,
 			at:      testEvenLater,
 			want:    false,
@@ -867,7 +868,7 @@ func TestTaskSnapshotRoundTrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			original := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+			original := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow))
 			tt.prepare(t, original)
 			original.PullEvents()
 
@@ -880,7 +881,7 @@ func TestTaskSnapshotRoundTrip(t *testing.T) {
 
 			// Восстановление из хранилища — не событие доменной жизни.
 			if events := restored.PullEvents(); len(events) != 0 {
-				t.Errorf("восстановленная задача несёт события %v, ожидалось ни одного", eventNames(events))
+				t.Errorf("восстановленная задача несёт события %v, ожидалось ни одного", todotest.EventNames(events))
 			}
 		})
 	}
@@ -891,7 +892,7 @@ func TestReconstituteTaskKeepsStaleDueDate(t *testing.T) {
 
 	// Инварианты создания к восстановлению не применяются: задача с давно
 	// просроченным сроком законно лежит в хранилище и обязана оттуда подняться.
-	task := newTestTaskWithDueDate(t, mustDueDate(t, testLater))
+	task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testLater, testNow))
 	snapshot := task.Snapshot()
 	snapshot.UpdatedAt = testTomorrowAt
 
@@ -910,7 +911,7 @@ func TestReconstituteTaskKeepsStaleDueDate(t *testing.T) {
 func TestReconstituteTaskValidation(t *testing.T) {
 	t.Parallel()
 
-	valid := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt)).Snapshot()
+	valid := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow)).Snapshot()
 
 	tests := []struct {
 		name    string
@@ -972,10 +973,10 @@ func TestTaskDoesNotShareMutableState(t *testing.T) {
 	t.Run("срок, переданный в конструктор", func(t *testing.T) {
 		t.Parallel()
 
-		due := mustDueDate(t, testTomorrowAt)
+		due := todotest.MustDueDate(t, testTomorrowAt, testNow)
 		task := newTestTaskWithDueDate(t, due)
 
-		*due = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+		*due = *todotest.MustDueDate(t, testTomorrowAt.Add(time.Hour), testNow)
 
 		assertDueDate(t, task, testTomorrowAt)
 	})
@@ -984,12 +985,12 @@ func TestTaskDoesNotShareMutableState(t *testing.T) {
 		t.Parallel()
 
 		task := newTestTask(t)
-		due := mustDueDate(t, testTomorrowAt)
+		due := todotest.MustDueDate(t, testTomorrowAt, testNow)
 		if err := task.Reschedule(due, testLater); err != nil {
 			t.Fatalf("Task.Reschedule(...) вернул ошибку: %v", err)
 		}
 
-		*due = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+		*due = *todotest.MustDueDate(t, testTomorrowAt.Add(time.Hour), testNow)
 
 		assertDueDate(t, task, testTomorrowAt)
 	})
@@ -997,10 +998,10 @@ func TestTaskDoesNotShareMutableState(t *testing.T) {
 	t.Run("срок в снимке", func(t *testing.T) {
 		t.Parallel()
 
-		task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+		task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow))
 		snapshot := task.Snapshot()
 
-		*snapshot.DueDate = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+		*snapshot.DueDate = *todotest.MustDueDate(t, testTomorrowAt.Add(time.Hour), testNow)
 
 		assertDueDate(t, task, testTomorrowAt)
 	})
@@ -1026,14 +1027,14 @@ func TestTaskDoesNotShareMutableState(t *testing.T) {
 	t.Run("срок, попавший в снимок при восстановлении", func(t *testing.T) {
 		t.Parallel()
 
-		snapshot := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt)).Snapshot()
+		snapshot := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow)).Snapshot()
 
 		restored, err := todo.ReconstituteTask(snapshot)
 		if err != nil {
 			t.Fatalf("ReconstituteTask(...) вернул ошибку: %v", err)
 		}
 
-		*snapshot.DueDate = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+		*snapshot.DueDate = *todotest.MustDueDate(t, testTomorrowAt.Add(time.Hour), testNow)
 
 		assertDueDate(t, restored, testTomorrowAt)
 	})
@@ -1043,18 +1044,18 @@ func TestTaskDoesNotShareMutableState(t *testing.T) {
 
 		// Событие — неизменяемый факт о прошлом: изменить его задним числом
 		// не должен никто, включая того, кто его получил.
-		task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+		task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow))
 
 		events := task.PullEvents()
 		if len(events) != 1 {
-			t.Fatalf("NewTask породил события %v, ожидалось ровно одно", eventNames(events))
+			t.Fatalf("NewTask породил события %v, ожидалось ровно одно", todotest.EventNames(events))
 		}
 		created, ok := events[0].(todo.TaskCreated)
 		if !ok {
 			t.Fatalf("тип события = %T, ожидалось todo.TaskCreated", events[0])
 		}
 
-		*created.DueDate = *mustDueDate(t, testTomorrowAt.Add(time.Hour))
+		*created.DueDate = *todotest.MustDueDate(t, testTomorrowAt.Add(time.Hour), testNow)
 
 		assertDueDate(t, task, testTomorrowAt)
 	})

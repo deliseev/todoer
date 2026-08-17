@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 func TestNewTaskID(t *testing.T) {
@@ -142,7 +143,7 @@ func TestParseTaskID(t *testing.T) {
 func TestTaskIDRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	original := mustTaskID(t)
+	original := todotest.MustTaskID(t)
 
 	restored, err := todo.ParseTaskID(original.String())
 	if err != nil {

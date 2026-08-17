@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 func TestNewDueDate(t *testing.T) {
@@ -218,7 +219,7 @@ func TestReconstituteDueDateNormalizedToUTC(t *testing.T) {
 func TestDueDateIsBefore(t *testing.T) {
 	t.Parallel()
 
-	due := mustDueDate(t, testNow.Add(24*time.Hour))
+	due := todotest.MustDueDate(t, testNow.Add(24*time.Hour), testNow)
 
 	tests := []struct {
 		name string

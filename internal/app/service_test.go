@@ -9,6 +9,7 @@ import (
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 func TestNewTaskService(t *testing.T) {
@@ -242,7 +243,7 @@ func TestCreateTask(t *testing.T) {
 		if deliveryErr.TaskID != id {
 			t.Errorf("ошибка о задаче %s, ожидалась %s", deliveryErr.TaskID, id)
 		}
-		if got := eventNames(deliveryErr.Events); len(got) != 1 || got[0] != todo.EventTaskCreated {
+		if got := todotest.EventNames(deliveryErr.Events); len(got) != 1 || got[0] != todo.EventTaskCreated {
 			t.Errorf("не доставлены события %v, ожидалось [%s]", got, todo.EventTaskCreated)
 		}
 		// Задача при этом уже сохранена: отказ доставки не отменяет записи.
@@ -489,7 +490,7 @@ func TestTaskMutationsWithoutChangeSkipWrite(t *testing.T) {
 				t.Errorf("ReconstituteTask(...) вернул ошибку: %v", err)
 				return
 			}
-			if err := rival.Rename(mustTitle(t, "Версия соседа"), testLater); err != nil {
+			if err := rival.Rename(todotest.MustTitle(t, "Версия соседа"), testLater); err != nil {
 				t.Errorf("Rename(...) вернул ошибку: %v", err)
 				return
 			}
@@ -535,7 +536,7 @@ func TestTaskMutationsOnMissingTask(t *testing.T) {
 	for _, m := range taskMutations() {
 		t.Run(m.name, func(t *testing.T) {
 			env := newTestEnv(t)
-			missing := mustTaskID(t)
+			missing := todotest.MustTaskID(t)
 
 			err := m.run(t.Context(), env.service, missing.String(), testOwner)
 			if !errors.Is(err, app.ErrTaskNotFound) {
@@ -686,7 +687,7 @@ func TestTaskMutationsReportDeliveryFailure(t *testing.T) {
 			if deliveryErr.TaskID != task.ID() {
 				t.Errorf("ошибка о задаче %s, ожидалась %s", deliveryErr.TaskID, task.ID())
 			}
-			if got := eventNames(deliveryErr.Events); len(got) != 1 || got[0] != m.event {
+			if got := todotest.EventNames(deliveryErr.Events); len(got) != 1 || got[0] != m.event {
 				t.Errorf("не доставлены события %v, ожидалось [%s]", got, m.event)
 			}
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 func TestNewTaskEmitsTaskCreated(t *testing.T) {
@@ -20,7 +21,7 @@ func TestNewTaskEmitsTaskCreated(t *testing.T) {
 
 	events := task.PullEvents()
 	if len(events) != 1 {
-		t.Fatalf("NewTask(...) породил события %v, ожидалось ровно одно", eventNames(events))
+		t.Fatalf("NewTask(...) породил события %v, ожидалось ровно одно", todotest.EventNames(events))
 	}
 
 	created, ok := events[0].(todo.TaskCreated)
@@ -60,10 +61,10 @@ func TestPullEventsDrainsBuffer(t *testing.T) {
 	task := newTestTask(t)
 
 	if events := task.PullEvents(); len(events) != 1 {
-		t.Fatalf("первый PullEvents() вернул %v, ожидалось одно событие", eventNames(events))
+		t.Fatalf("первый PullEvents() вернул %v, ожидалось одно событие", todotest.EventNames(events))
 	}
 	if events := task.PullEvents(); len(events) != 0 {
-		t.Errorf("второй PullEvents() вернул %v, ожидался пустой результат", eventNames(events))
+		t.Errorf("второй PullEvents() вернул %v, ожидался пустой результат", todotest.EventNames(events))
 	}
 }
 
@@ -72,7 +73,7 @@ func TestEventsFollowOperationOrder(t *testing.T) {
 
 	task := newTestTask(t)
 
-	if err := task.Rename(mustTitle(t, "Купить кефир"), testLater); err != nil {
+	if err := task.Rename(todotest.MustTitle(t, "Купить кефир"), testLater); err != nil {
 		t.Fatalf("Task.Rename(...) вернул ошибку: %v", err)
 	}
 	if err := task.ChangePriority(todo.PriorityCritical, testLater); err != nil {
@@ -93,7 +94,7 @@ func TestEventsFollowOperationOrder(t *testing.T) {
 		todo.EventTaskCompleted,
 	}
 
-	if got := eventNames(task.PullEvents()); !slices.Equal(got, want) {
+	if got := todotest.EventNames(task.PullEvents()); !slices.Equal(got, want) {
 		t.Errorf("порядок событий = %v, ожидалось %v", got, want)
 	}
 }
@@ -104,14 +105,14 @@ func TestEventCarriesOperationTime(t *testing.T) {
 	task := newTestTask(t)
 	task.PullEvents()
 
-	newTitle := mustTitle(t, "Купить кефир")
+	newTitle := todotest.MustTitle(t, "Купить кефир")
 	if err := task.Rename(newTitle, testLater); err != nil {
 		t.Fatalf("Task.Rename(...) вернул ошибку: %v", err)
 	}
 
 	events := task.PullEvents()
 	if len(events) != 1 {
-		t.Fatalf("Rename породил события %v, ожидалось ровно одно", eventNames(events))
+		t.Fatalf("Rename породил события %v, ожидалось ровно одно", todotest.EventNames(events))
 	}
 
 	renamed, ok := events[0].(todo.TaskRenamed)
@@ -137,7 +138,7 @@ func TestRejectedOperationEmitsNoEvents(t *testing.T) {
 	completeTask(t, task)
 	task.PullEvents()
 
-	if err := task.Rename(mustTitle(t, "Купить кефир"), testEvenLater); err == nil {
+	if err := task.Rename(todotest.MustTitle(t, "Купить кефир"), testEvenLater); err == nil {
 		t.Fatal("Task.Rename(...) на выполненной задаче не вернул ошибку")
 	}
 	if err := task.Start(testEvenLater); err == nil {
@@ -145,7 +146,7 @@ func TestRejectedOperationEmitsNoEvents(t *testing.T) {
 	}
 
 	if events := task.PullEvents(); len(events) != 0 {
-		t.Errorf("отклонённые операции породили события %v, ожидалось ни одного", eventNames(events))
+		t.Errorf("отклонённые операции породили события %v, ожидалось ни одного", todotest.EventNames(events))
 	}
 }
 
@@ -160,8 +161,10 @@ func TestRescheduleEmitsEventWithNewDueDate(t *testing.T) {
 		{
 			// Срок именно другой: задача создаётся с testTomorrowAt, и перенос
 			// на тот же момент изменением не является — события не будет.
-			name:    "назначение срока",
-			dueDate: func(t *testing.T) *todo.DueDate { return mustDueDate(t, testTomorrowAt.Add(24*time.Hour)) },
+			name: "назначение срока",
+			dueDate: func(t *testing.T) *todo.DueDate {
+				return todotest.MustDueDate(t, testTomorrowAt.Add(24*time.Hour), testNow)
+			},
 		},
 		{
 			name:    "снятие срока",
@@ -174,7 +177,7 @@ func TestRescheduleEmitsEventWithNewDueDate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			task := newTestTaskWithDueDate(t, mustDueDate(t, testTomorrowAt))
+			task := newTestTaskWithDueDate(t, todotest.MustDueDate(t, testTomorrowAt, testNow))
 			task.PullEvents()
 
 			want := tt.dueDate(t)
@@ -184,7 +187,7 @@ func TestRescheduleEmitsEventWithNewDueDate(t *testing.T) {
 
 			events := task.PullEvents()
 			if len(events) != 1 {
-				t.Fatalf("Reschedule породил события %v, ожидалось ровно одно", eventNames(events))
+				t.Fatalf("Reschedule породил события %v, ожидалось ровно одно", todotest.EventNames(events))
 			}
 
 			rescheduled, ok := events[0].(todo.TaskRescheduled)
@@ -246,7 +249,7 @@ func TestTerminalEventsCarryTerminalTime(t *testing.T) {
 
 			events := task.PullEvents()
 			if len(events) != 1 {
-				t.Fatalf("операция породила события %v, ожидалось ровно одно", eventNames(events))
+				t.Fatalf("операция породила события %v, ожидалось ровно одно", todotest.EventNames(events))
 			}
 			if !tt.wantEvent(events[0]) {
 				t.Fatalf("тип события = %T, не соответствует ожидаемому", events[0])

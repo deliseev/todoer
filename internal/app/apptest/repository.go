@@ -1,13 +1,15 @@
 // Package apptest содержит наборы тестов контракта для портов слоя сценариев.
 //
-// Реализаций у app.Repository уже две — хранилище в памяти из internal/infra
-// и двойник в тестах сценариев, — и расходятся они молча. Устройство у них
-// разное и обязано остаться разным: двойнику нужны инъекция отказов и хук
-// перед записью, настоящему хранилищу они противопоказаны. Совпадать обязано
-// поведение, и оно описано здесь один раз, чтобы расхождение ловил go test,
-// а не ревью.
+// Реализаций у app.Repository уже три — хранилище на Postgres, хранилище в
+// памяти из internal/infra и двойник в тестах сценариев, — и расходятся они
+// молча. Устройство у них разное и обязано остаться разным: двойнику нужны
+// инъекция отказов и хук перед записью, настоящим хранилищам они
+// противопоказаны. Совпадать обязано поведение, и оно описано здесь один раз,
+// чтобы расхождение ловил go test, а не ревью. Цена изменения порта от этого
+// не растёт, а падает: один набор плюс реализации вместо трёх наборов,
+// расходящихся поодиночке.
 //
-// Пакет обычный, а не тестовый: его импортируют тесты двух разных пакетов,
+// Пакет обычный, а не тестовый: его импортируют тесты трёх разных пакетов,
 // а из файлов с суффиксом _test импортировать нечего. Так же устроены
 // fstest.TestFS и httptest в стандартной библиотеке.
 package apptest
@@ -22,6 +24,7 @@ import (
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 // Опорные моменты времени. Хранилище о времени не думает — оно принимает то,
@@ -94,7 +97,7 @@ func RepositoryContract(t *testing.T, newRepository func(t *testing.T) app.Repos
 
 // contractRoundTrip: записанная задача поднимается тем же состоянием.
 func contractRoundTrip(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	got, _, err := repo.Get(t.Context(), task.ID())
@@ -150,10 +153,10 @@ func contractRoundTrip(t *testing.T, repo app.Repository) {
 // хранилище не вправе придумать его на подъёме.
 func contractRoundTripWithoutDueDate(t *testing.T, repo app.Repository) {
 	task, err := todo.NewTask(
-		mustTaskID(t),
-		mustOwnerID(t, testOwner),
-		mustTitle(t, "Позвонить в сервис"),
-		mustDescription(t, ""),
+		todotest.MustTaskID(t),
+		todotest.MustOwnerID(t, testOwner),
+		todotest.MustTitle(t, "Позвонить в сервис"),
+		todotest.MustDescription(t, ""),
 		todo.PriorityHigh,
 		nil,
 		testNow,
@@ -172,7 +175,7 @@ func contractRoundTripWithoutDueDate(t *testing.T, repo app.Repository) {
 // contractRoundTripCompleted: момент завершения переживает запись —
 // восстановление не сводится к созданию новой задачи.
 func contractRoundTripCompleted(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	if err := task.Complete(testLater); err != nil {
 		t.Fatalf("Complete(...) вернул ошибку: %v", err)
 	}
@@ -194,7 +197,7 @@ func contractRoundTripCompleted(t *testing.T, repo app.Repository) {
 
 // contractTasksDoNotMix: задачи хранятся раздельно по идентификатору.
 func contractTasksDoNotMix(t *testing.T, repo app.Repository) {
-	first, second := newTask(t), newTask(t)
+	first, second := todotest.NewTask(t, testOwner, testNow), todotest.NewTask(t, testOwner, testNow)
 	mustRename(t, second, "Купить кефир", testLater)
 
 	mustSave(t, repo, first, 0)
@@ -208,7 +211,7 @@ func contractTasksDoNotMix(t *testing.T, repo app.Repository) {
 
 // contractGetMissing: отсутствие задачи — это ErrTaskNotFound и никакой задачи.
 func contractGetMissing(t *testing.T, repo app.Repository) {
-	got, version, err := repo.Get(t.Context(), mustTaskID(t))
+	got, version, err := repo.Get(t.Context(), todotest.MustTaskID(t))
 	if !errors.Is(err, app.ErrTaskNotFound) {
 		t.Fatalf("ожидалась ErrTaskNotFound, получено: %v", err)
 	}
@@ -222,7 +225,7 @@ func contractGetMissing(t *testing.T, repo app.Repository) {
 
 // contractUpdateReplacesState: повторная запись заменяет состояние целиком.
 func contractUpdateReplacesState(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	stored, storedVersion, err := repo.Get(t.Context(), task.ID())
@@ -246,14 +249,14 @@ func contractUpdateReplacesState(t *testing.T, repo app.Repository) {
 
 // contractInsertFresh: вставка — это loadedVersion == 0 и пустое место.
 func contractInsertFresh(t *testing.T, repo app.Repository) {
-	mustSave(t, repo, newTask(t), 0)
+	mustSave(t, repo, todotest.NewTask(t, testOwner, testNow), 0)
 }
 
 // contractInsertMutated: агрегат не обязан сохраняться после каждой мутации.
 // «Создать, начать, записать один раз» — законный сценарий, и запрещать его
 // хранилище не вправе.
 func contractInsertMutated(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustRename(t, task, "Купить кефир", testLater)
 	if err := task.Start(testLater); err != nil {
 		t.Fatalf("Start(...) вернул ошибку: %v", err)
@@ -272,7 +275,7 @@ func contractInsertMutated(t *testing.T, repo app.Repository) {
 // contractInsertOverExisting: писатель считает задачу новой, а место занято.
 // Это конфликт, а не перезапись: тот, кто вставляет, чужого состояния не читал.
 func contractInsertOverExisting(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	// Другой писатель с тем же идентификатором и своим представлением о задаче.
@@ -287,7 +290,7 @@ func contractInsertOverExisting(t *testing.T, repo app.Repository) {
 // contractSaveVanished: задачу поднимали из хранилища, а сейчас её там нет.
 // Записать её как есть нельзя — версия подъёма ни с чем не сходится.
 func contractSaveVanished(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustRename(t, task, "Купить кефир", testLater)
 
 	if err := repo.Save(t.Context(), task, task.Version()-1); !errors.Is(err, app.ErrVersionConflict) {
@@ -335,7 +338,7 @@ func contractConflictLeavesStorageIntact(t *testing.T, repo app.Repository) {
 // и записать их одной операцией законно. Число мутаций между Get и Save
 // ничем не ограничено.
 func contractManyMutationsOneSave(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	stored, storedVersion, err := repo.Get(t.Context(), task.ID())
@@ -360,7 +363,7 @@ func contractManyMutationsOneSave(t *testing.T, repo app.Repository) {
 // чужую запись, сделанную между его Get и Save. Правило «на единицу больше»
 // здесь и ломается — сходится с чужой версией и молча её теряет.
 func contractNoLostUpdate(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	first, firstVersion, err := repo.Get(t.Context(), task.ID())
@@ -394,7 +397,7 @@ func contractNoLostUpdate(t *testing.T, repo app.Repository) {
 // contractRepeatedSaveRejected: версия не выросла — значит с прошлой записи
 // ничего не произошло, и это не обновление, а повтор.
 func contractRepeatedSaveRejected(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	if err := repo.Save(t.Context(), task, 0); !errors.Is(err, app.ErrVersionConflict) {
@@ -405,7 +408,7 @@ func contractRepeatedSaveRejected(t *testing.T, repo app.Repository) {
 // contractLoadedTaskIsolated: изменения поднятой задачи не попадают в
 // хранилище в обход Save.
 func contractLoadedTaskIsolated(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	first := mustGet(t, repo, task.ID())
@@ -423,7 +426,7 @@ func contractLoadedTaskIsolated(t *testing.T, repo app.Repository) {
 // contractSavedTaskIsolated: объект, отданный в Save, продолжает жить у
 // вызывающего, и его дальнейшие мутации хранилища не касаются.
 func contractSavedTaskIsolated(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	mustRename(t, task, "Купить кефир", testLater)
@@ -440,7 +443,7 @@ func contractSavedTaskIsolated(t *testing.T, repo app.Repository) {
 // снимок клонирует их при каждом вызове, — поэтому проверка поведенческая:
 // меняем через одну копию, смотрим на другую.
 func contractOptionalFieldsCloned(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	first := mustGet(t, repo, task.ID())
@@ -484,7 +487,7 @@ func contractOptionalFieldsCloned(t *testing.T, repo app.Repository) {
 // contractGetRespectsCancel: отменённый запрос не обслуживается, и ошибка
 // обязана донести причину до errors.Is — сценарий её не подменяет.
 func contractGetRespectsCancel(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -497,7 +500,7 @@ func contractGetRespectsCancel(t *testing.T, repo app.Repository) {
 
 // contractSaveRespectsCancel: до записи отмена законна и останавливает работу.
 func contractSaveRespectsCancel(t *testing.T, repo app.Repository) {
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -523,7 +526,7 @@ func contractRejectsNilTask(t *testing.T, repo app.Repository) {
 func contractConcurrentWriters(t *testing.T, repo app.Repository) {
 	const editorCount = 8
 
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	// Каждый редактор поднимает задачу заранее: все стартуют с одной и той же
@@ -581,7 +584,7 @@ func contractConcurrentWriters(t *testing.T, repo app.Repository) {
 func contractConcurrentReadWrite(t *testing.T, repo app.Repository) {
 	const readers = 8
 
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	writer, writerVersion, err := repo.Get(t.Context(), task.ID())
@@ -619,7 +622,7 @@ func contractConcurrentReadWrite(t *testing.T, repo app.Repository) {
 func twoWriters(t *testing.T, repo app.Repository) (first, second *todo.Task, loaded int) {
 	t.Helper()
 
-	task := newTask(t)
+	task := todotest.NewTask(t, testOwner, testNow)
 	mustSave(t, repo, task, 0)
 
 	first, loaded, err := repo.Get(t.Context(), task.ID())
@@ -656,26 +659,6 @@ func mustGet(t *testing.T, repo app.Repository, id todo.TaskID) *todo.Task {
 	return task
 }
 
-// newTask создаёт типовую задачу со сроком: обычный приоритет, статус
-// pending, первая версия.
-func newTask(t *testing.T) *todo.Task {
-	t.Helper()
-
-	task, err := todo.NewTask(
-		mustTaskID(t),
-		mustOwnerID(t, testOwner),
-		mustTitle(t, "Купить молоко"),
-		mustDescription(t, "Два литра, в магазине у дома"),
-		todo.PriorityNormal,
-		mustDueDate(t, testDue),
-		testNow,
-	)
-	if err != nil {
-		t.Fatalf("NewTask(...) вернул ошибку: %v", err)
-	}
-	return task
-}
-
 // reconstitute поднимает задачу из снимка или валит тест.
 func reconstitute(t *testing.T, snapshot todo.TaskSnapshot) *todo.Task {
 	t.Helper()
@@ -692,62 +675,7 @@ func reconstitute(t *testing.T, snapshot todo.TaskSnapshot) *todo.Task {
 func mustRename(t *testing.T, task *todo.Task, title string, now time.Time) {
 	t.Helper()
 
-	if err := task.Rename(mustTitle(t, title), now); err != nil {
+	if err := task.Rename(todotest.MustTitle(t, title), now); err != nil {
 		t.Fatalf("Rename(%q) вернул ошибку: %v", title, err)
 	}
-}
-
-// mustTitle создаёт заголовок или валит тест.
-func mustTitle(t *testing.T, s string) todo.Title {
-	t.Helper()
-
-	title, err := todo.NewTitle(s)
-	if err != nil {
-		t.Fatalf("NewTitle(%q) вернул ошибку: %v", s, err)
-	}
-	return title
-}
-
-// mustDescription создаёт описание или валит тест.
-func mustDescription(t *testing.T, s string) todo.Description {
-	t.Helper()
-
-	description, err := todo.NewDescription(s)
-	if err != nil {
-		t.Fatalf("NewDescription(%q) вернул ошибку: %v", s, err)
-	}
-	return description
-}
-
-// mustTaskID создаёт новый идентификатор задачи или валит тест.
-func mustTaskID(t *testing.T) todo.TaskID {
-	t.Helper()
-
-	id, err := todo.NewTaskID()
-	if err != nil {
-		t.Fatalf("NewTaskID() вернул ошибку: %v", err)
-	}
-	return id
-}
-
-// mustOwnerID разбирает идентификатор владельца или валит тест.
-func mustOwnerID(t *testing.T, s string) todo.OwnerID {
-	t.Helper()
-
-	id, err := todo.ParseOwnerID(s)
-	if err != nil {
-		t.Fatalf("ParseOwnerID(%q) вернул ошибку: %v", s, err)
-	}
-	return id
-}
-
-// mustDueDate создаёт срок выполнения относительно testNow или валит тест.
-func mustDueDate(t *testing.T, at time.Time) *todo.DueDate {
-	t.Helper()
-
-	due, err := todo.NewDueDate(at, testNow)
-	if err != nil {
-		t.Fatalf("NewDueDate(%s, %s) вернул ошибку: %v", at, testNow, err)
-	}
-	return &due
 }

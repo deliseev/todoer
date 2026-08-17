@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 func TestNewTitle(t *testing.T) {
@@ -119,9 +120,9 @@ func TestTitleIsComparable(t *testing.T) {
 
 	// Значимые объекты сравниваются по значению: одинаковый смысл —
 	// одинаковое значение, даже если исходные строки отличались пробелами.
-	first := mustTitle(t, "Купить молоко")
-	second := mustTitle(t, "  Купить молоко  ")
-	other := mustTitle(t, "Купить хлеб")
+	first := todotest.MustTitle(t, "Купить молоко")
+	second := todotest.MustTitle(t, "  Купить молоко  ")
+	other := todotest.MustTitle(t, "Купить хлеб")
 
 	if first != second {
 		t.Errorf("заголовки %q и %q должны быть равны", first.String(), second.String())

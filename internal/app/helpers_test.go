@@ -6,6 +6,7 @@ import (
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
+	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 )
 
 // Опорные моменты времени. Часы в сценариях подставные, поэтому «сейчас»
@@ -52,19 +53,9 @@ func newTestEnv(t *testing.T) testEnv {
 func seedTask(t *testing.T, repo *fakeRepository, owner string, status todo.Status) *todo.Task {
 	t.Helper()
 
-	task, err := todo.NewTask(
-		mustTaskID(t),
-		mustOwnerID(t, owner),
-		mustTitle(t, "Купить молоко"),
-		mustDescription(t, "Два литра, в магазине у дома"),
-		todo.PriorityNormal,
-		mustDueDate(t, testDue),
-		testNow,
-	)
-	if err != nil {
-		t.Fatalf("NewTask(...) вернул ошибку: %v", err)
-	}
+	task := todotest.NewTask(t, owner, testNow)
 
+	var err error
 	switch status {
 	case todo.StatusPending:
 		// Только что созданная задача уже ждёт выполнения.
@@ -85,69 +76,4 @@ func seedTask(t *testing.T, repo *fakeRepository, owner string, status todo.Stat
 	repo.put(task.Snapshot())
 
 	return task
-}
-
-// eventNames раскладывает события в список имён — так порядок и состав
-// читаются в диагностике одной строкой.
-func eventNames(events []todo.DomainEvent) []string {
-	names := make([]string, len(events))
-	for i, e := range events {
-		names[i] = e.EventName()
-	}
-	return names
-}
-
-// mustTitle создаёт заголовок или валит тест.
-func mustTitle(t *testing.T, s string) todo.Title {
-	t.Helper()
-
-	title, err := todo.NewTitle(s)
-	if err != nil {
-		t.Fatalf("NewTitle(%q) вернул ошибку: %v", s, err)
-	}
-	return title
-}
-
-// mustDescription создаёт описание или валит тест.
-func mustDescription(t *testing.T, s string) todo.Description {
-	t.Helper()
-
-	description, err := todo.NewDescription(s)
-	if err != nil {
-		t.Fatalf("NewDescription(%q) вернул ошибку: %v", s, err)
-	}
-	return description
-}
-
-// mustTaskID создаёт новый идентификатор задачи или валит тест.
-func mustTaskID(t *testing.T) todo.TaskID {
-	t.Helper()
-
-	id, err := todo.NewTaskID()
-	if err != nil {
-		t.Fatalf("NewTaskID() вернул ошибку: %v", err)
-	}
-	return id
-}
-
-// mustOwnerID разбирает идентификатор владельца или валит тест.
-func mustOwnerID(t *testing.T, s string) todo.OwnerID {
-	t.Helper()
-
-	id, err := todo.ParseOwnerID(s)
-	if err != nil {
-		t.Fatalf("ParseOwnerID(%q) вернул ошибку: %v", s, err)
-	}
-	return id
-}
-
-// mustDueDate создаёт срок выполнения относительно testNow или валит тест.
-func mustDueDate(t *testing.T, at time.Time) *todo.DueDate {
-	t.Helper()
-
-	due, err := todo.NewDueDate(at, testNow)
-	if err != nil {
-		t.Fatalf("NewDueDate(%s, %s) вернул ошибку: %v", at, testNow, err)
-	}
-	return &due
 }
