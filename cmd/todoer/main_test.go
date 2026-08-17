@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deliseev/todoer/internal/infra"
+	"github.com/deliseev/todoer/internal/infra/postgres"
 	"github.com/deliseev/todoer/internal/infra/postgres/pgtest"
 )
 
@@ -27,9 +27,15 @@ func TestNewTaskService(t *testing.T) {
 	t.Run("боевые реализации подходят портам", func(t *testing.T) {
 		t.Parallel()
 
-		// Хранилище здесь в памяти намеренно: проверяется сборка сервиса из
-		// портов, а не то, чем подставлен один из них.
-		service, err := newTaskService(infra.NewInMemoryTaskRepository())
+		// Хранилище настоящее: боевая реализация у порта осталась одна, и
+		// проверять сборку на чём-то ещё значило бы проверять не сборку.
+		pool, err := postgres.Open(t.Context(), pgtest.NewDSN(t))
+		if err != nil {
+			t.Fatalf("подключение к базе теста: %v", err)
+		}
+		t.Cleanup(pool.Close)
+
+		service, err := newTaskService(postgres.NewTaskRepository(pool))
 		if err != nil {
 			t.Fatalf("newTaskService() вернул ошибку: %v", err)
 		}
