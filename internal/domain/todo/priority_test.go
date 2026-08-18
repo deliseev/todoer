@@ -131,6 +131,94 @@ func TestPriorityParseStringRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPriorityRank(t *testing.T) {
+	t.Parallel()
+
+	// Ранг — порядок важности, и взять его больше неоткуда. Имя не годится:
+	// по алфавиту critical идёт раньше high. Значение константы не годится
+	// тоже: нулём обязан быть PriorityNormal — нулевое значение осмысленно, —
+	// и из-за этого PriorityLow больше обычного по числу, будучи меньше по
+	// важности.
+	t.Run("ранги возрастают вместе с важностью", func(t *testing.T) {
+		t.Parallel()
+
+		ascending := []todo.Priority{
+			todo.PriorityLow,
+			todo.PriorityNormal,
+			todo.PriorityHigh,
+			todo.PriorityCritical,
+		}
+
+		// Проверяются отношения, а не конкретные числа: правило — порядок,
+		// а числа деталь. Привязка к ним запретила бы вставить новый приоритет
+		// между существующими, ничего при этом не сломав.
+		for i := 1; i < len(ascending); i++ {
+			lower, higher := ascending[i-1], ascending[i]
+
+			if lower.Rank() >= higher.Rank() {
+				t.Errorf("ранг %v = %d, ранг %v = %d, ожидалось строгое возрастание",
+					lower, lower.Rank(), higher, higher.Rank())
+			}
+		}
+	})
+
+	t.Run("порядок важности не совпадает с порядком констант", func(t *testing.T) {
+		t.Parallel()
+
+		// Ради этого таблица рангов и заводится: свести Rank к int(p) выглядит
+		// соблазнительно, компилируется и молча ломает сортировку.
+		if todo.PriorityNormal >= todo.PriorityLow {
+			t.Fatal("PriorityNormal больше не меньше PriorityLow по значению — проверка потеряла смысл")
+		}
+		if todo.PriorityNormal.Rank() <= todo.PriorityLow.Rank() {
+			t.Errorf("ранг обычного = %d, ранг низкого = %d, ожидалось, что обычный важнее",
+				todo.PriorityNormal.Rank(), todo.PriorityLow.Rank())
+		}
+	})
+
+	t.Run("ранги допустимых приоритетов различны", func(t *testing.T) {
+		t.Parallel()
+
+		// Общий ранг на двоих склеил бы два приоритета в сортировке, и порядок
+		// внутри пары стал бы делом случая.
+		seen := make(map[int]todo.Priority)
+
+		for value := range 256 {
+			priority := todo.Priority(value)
+			if !priority.IsValid() {
+				continue
+			}
+
+			if other, taken := seen[priority.Rank()]; taken {
+				t.Errorf("%v и %v делят ранг %d", other, priority, priority.Rank())
+			}
+			seen[priority.Rank()] = priority
+		}
+	})
+
+	t.Run("ранг есть ровно у допустимых приоритетов", func(t *testing.T) {
+		t.Parallel()
+
+		// Таблица рангов и таблица имён обязаны идти в ногу: новый приоритет,
+		// забытый в рангах, иначе молча получил бы чужой ранг и сел не на своё
+		// место. Невозможный ранг у недопустимого значения — то же решение,
+		// что "unknown" у String: тихий ноль слился бы с законным рангом.
+		const unknownRank = -1
+
+		for value := range 256 {
+			priority := todo.Priority(value)
+
+			switch {
+			case priority.IsValid() && priority.Rank() == unknownRank:
+				t.Errorf("Priority(%d).Rank() = %d, а приоритет допустим", value, unknownRank)
+			case !priority.IsValid() && priority.Rank() != unknownRank:
+				t.Errorf("Priority(%d).Rank() = %d, ожидалось %d: приоритет недопустим",
+					value, priority.Rank(), unknownRank)
+			}
+		}
+	})
+}
+
 func TestPriorityZeroValueIsNormal(t *testing.T) {
 	t.Parallel()
 

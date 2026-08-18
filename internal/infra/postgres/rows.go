@@ -37,6 +37,13 @@ type taskRow struct {
 	CreatedAt   time.Time  `db:"created_at"`
 	UpdatedAt   time.Time  `db:"updated_at"`
 	Version     int        `db:"version"`
+
+	// PriorityRank — ранг важности приоритета, служебный ключ сортировки
+	// списка. Тег "-", потому что колонка пишется, но не читается: подъём
+	// собирает приоритет из имени через ParsePriority, и единственным
+	// источником правды остаётся домен, а не эта копия. В args она попадает
+	// явно — вместе с остальными значениями записи.
+	PriorityRank int `db:"-"`
 }
 
 // newTaskRow раскладывает снимок задачи по колонкам.
@@ -48,9 +55,13 @@ func newTaskRow(snapshot todo.TaskSnapshot) taskRow {
 		Description: snapshot.Description.String(),
 		Status:      snapshot.Status.String(),
 		Priority:    snapshot.Priority.String(),
-		CreatedAt:   snapshot.CreatedAt,
-		UpdatedAt:   snapshot.UpdatedAt,
-		Version:     snapshot.Version,
+
+		// Ранг берётся у домена, а не выводится здесь: порядок важности —
+		// доменное правило, и у него ровно один носитель.
+		PriorityRank: snapshot.Priority.Rank(),
+		CreatedAt:    snapshot.CreatedAt,
+		UpdatedAt:    snapshot.UpdatedAt,
+		Version:      snapshot.Version,
 	}
 
 	// Необязательное копируется, а не переносится указателем: снимок отдал
@@ -81,17 +92,18 @@ func newTaskRow(snapshot todo.TaskSnapshot) taskRow {
 // запрос ждёт и не получил, и лишний, которого запрос не ждёт.
 func (r taskRow) args() pgx.StrictNamedArgs {
 	return pgx.StrictNamedArgs{
-		"id":           r.ID,
-		"owner_id":     r.OwnerID,
-		"title":        r.Title,
-		"description":  r.Description,
-		"status":       r.Status,
-		"priority":     r.Priority,
-		"due_date":     r.DueDate,
-		"completed_at": r.CompletedAt,
-		"created_at":   r.CreatedAt,
-		"updated_at":   r.UpdatedAt,
-		"version":      r.Version,
+		"id":            r.ID,
+		"owner_id":      r.OwnerID,
+		"title":         r.Title,
+		"description":   r.Description,
+		"status":        r.Status,
+		"priority":      r.Priority,
+		"priority_rank": r.PriorityRank,
+		"due_date":      r.DueDate,
+		"completed_at":  r.CompletedAt,
+		"created_at":    r.CreatedAt,
+		"updated_at":    r.UpdatedAt,
+		"version":       r.Version,
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/deliseev/todoer/internal/domain/todo"
 	"github.com/deliseev/todoer/internal/domain/todo/todotest"
 	"github.com/deliseev/todoer/internal/infra"
@@ -69,6 +71,137 @@ func TestOverdueTaskIsRestored(t *testing.T) {
 	if !got.IsOverdue(testNow) {
 		t.Error("поднятая задача не считается просроченной")
 	}
+}
+
+// TestPriorityRankColumn: ранг приоритета уезжает в колонку и служит только
+// ключом сортировки.
+//
+// Порт этого не обещает и обещать не может: ранг — не часть задачи, а то, чем
+// список сортирует по важности. Сортировать по имени нельзя (алфавит ставит
+// critical раньше high), а расписать порядок важности в SQL — значит завести
+// правилу второго носителя, который разойдётся с доменом молча.
+func TestPriorityRankColumn(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ранг соответствует приоритету", func(t *testing.T) {
+		t.Parallel()
+
+		priorities := map[string]todo.Priority{
+			"низкий":      todo.PriorityLow,
+			"обычный":     todo.PriorityNormal,
+			"высокий":     todo.PriorityHigh,
+			"критический": todo.PriorityCritical,
+		}
+
+		pool := newPool(t)
+		repo := postgres.NewTaskRepository(pool)
+
+		for name, priority := range priorities {
+			t.Run(name, func(t *testing.T) {
+				task := newTaskWithPriority(t, priority)
+				if err := repo.Save(t.Context(), task, 0); err != nil {
+					t.Fatalf("Save(...) вернул ошибку: %v", err)
+				}
+
+				if got := storedRank(t, pool, task.ID()); got != priority.Rank() {
+					t.Errorf("priority_rank = %d, ожидался %d", got, priority.Rank())
+				}
+			})
+		}
+	})
+
+	t.Run("смена приоритета двигает ранг", func(t *testing.T) {
+		t.Parallel()
+
+		// Ранг пишут оба запроса — и вставка, и обновление. Забудь его
+		// обновление, и задача осталась бы в сортировке на прежнем месте,
+		// показывая клиенту порядок, которого в данных нет.
+		pool := newPool(t)
+		repo := postgres.NewTaskRepository(pool)
+
+		task := newTaskWithPriority(t, todo.PriorityLow)
+		if err := repo.Save(t.Context(), task, 0); err != nil {
+			t.Fatalf("Save(...) вернул ошибку: %v", err)
+		}
+
+		if err := task.ChangePriority(todo.PriorityCritical, testNow); err != nil {
+			t.Fatalf("ChangePriority(...) вернул ошибку: %v", err)
+		}
+		if err := repo.Save(t.Context(), task, 1); err != nil {
+			t.Fatalf("повторный Save(...) вернул ошибку: %v", err)
+		}
+
+		if got := storedRank(t, pool, task.ID()); got != todo.PriorityCritical.Rank() {
+			t.Errorf("priority_rank = %d, ожидался %d", got, todo.PriorityCritical.Rank())
+		}
+	})
+
+	t.Run("приоритет поднимается из имени, а не из ранга", func(t *testing.T) {
+		t.Parallel()
+
+		// Колонка пишется, но не читается, и это не мелочь: ранг — копия,
+		// которая может разойтись с доменом (смена рангов потребует миграции
+		// с засыпкой). Единственным источником правды остаётся имя, и подъём
+		// обязан идти через ParsePriority.
+		pool := newPool(t)
+		repo := postgres.NewTaskRepository(pool)
+
+		task := newTaskWithPriority(t, todo.PriorityHigh)
+		if err := repo.Save(t.Context(), task, 0); err != nil {
+			t.Fatalf("Save(...) вернул ошибку: %v", err)
+		}
+
+		// Ранг портится в обход хранилища — так, как это сделала бы рука
+		// в psql или отставшая миграция.
+		if _, err := pool.Exec(t.Context(),
+			"UPDATE tasks SET priority_rank = $1 WHERE id = $2",
+			todo.PriorityLow.Rank(), task.ID().String(),
+		); err != nil {
+			t.Fatalf("порча ранга: %v", err)
+		}
+
+		got, _, err := repo.Get(t.Context(), task.ID())
+		if err != nil {
+			t.Fatalf("Get(...) вернул ошибку: %v", err)
+		}
+		if got.Priority() != todo.PriorityHigh {
+			t.Errorf("приоритет = %v, ожидался %v: подъём поверил колонке ранга",
+				got.Priority(), todo.PriorityHigh)
+		}
+	})
+}
+
+// newTaskWithPriority собирает задачу без срока с указанным приоритетом.
+func newTaskWithPriority(t *testing.T, priority todo.Priority) *todo.Task {
+	t.Helper()
+
+	task, err := todo.NewTask(
+		todotest.MustTaskID(t),
+		todotest.MustOwnerID(t, testOwner),
+		todotest.MustTitle(t, "Купить молоко"),
+		todo.Description{},
+		priority,
+		nil,
+		testNow,
+	)
+	if err != nil {
+		t.Fatalf("NewTask(...) вернул ошибку: %v", err)
+	}
+
+	return task
+}
+
+// storedRank читает ранг приоритета прямо из колонки, мимо хранилища.
+func storedRank(t *testing.T, pool *pgxpool.Pool, id todo.TaskID) int {
+	t.Helper()
+
+	var rank int
+	if err := pool.QueryRow(t.Context(),
+		"SELECT priority_rank FROM tasks WHERE id = $1", id.String()).Scan(&rank); err != nil {
+		t.Fatalf("чтение ранга: %v", err)
+	}
+
+	return rank
 }
 
 // TestTimeResolution: договорённость о точности между часами и базой.

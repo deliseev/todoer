@@ -29,14 +29,15 @@ const (
 		FROM tasks WHERE id = @id`
 
 	insertTask = `INSERT INTO tasks (id, owner_id, title, description, status, priority,
-			due_date, completed_at, created_at, updated_at, version)
+			priority_rank, due_date, completed_at, created_at, updated_at, version)
 		VALUES (@id, @owner_id, @title, @description, @status, @priority,
-			@due_date, @completed_at, @created_at, @updated_at, @version)
+			@priority_rank, @due_date, @completed_at, @created_at, @updated_at, @version)
 		ON CONFLICT (id) DO NOTHING`
 
 	updateTask = `UPDATE tasks SET
 			owner_id = @owner_id, title = @title, description = @description,
-			status = @status, priority = @priority, due_date = @due_date,
+			status = @status, priority = @priority, priority_rank = @priority_rank,
+			due_date = @due_date,
 			completed_at = @completed_at, created_at = @created_at,
 			updated_at = @updated_at, version = @version
 		WHERE id = @id AND version = @loaded_version`
