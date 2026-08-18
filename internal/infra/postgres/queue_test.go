@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +109,79 @@ func TestQueueTake(t *testing.T) {
 		}
 		if again := takeAll(t, queue); len(again) != 1 {
 			t.Errorf("после отказа доставки в очереди %d сообщений, ожидалось 1", len(again))
+		}
+	})
+
+	t.Run("недоставленное сообщение не держит очередь", func(t *testing.T) {
+		t.Parallel()
+
+		// Доставка идёт партиями, и партия уезжает целиком или никак.
+		// Значит сообщение, которое шина не принимает, тащило бы за собой
+		// всё, что встало за ним: очередь стояла бы вечно, а каждая побудка
+		// заново упиралась бы в него же.
+		pool := newPool(t)
+		queue := postgres.NewQueue(pool)
+
+		stuck := todotest.NewTask(t, testOwner, testNow)
+		queueTask(t, pool, stuck)
+
+		deliveryErr := errors.New("шина не принимает это сообщение")
+		if _, err := queue.Take(t.Context(), 10,
+			func(context.Context, []outbox.Message) error { return deliveryErr },
+		); !errors.Is(err, deliveryErr) {
+			t.Fatalf("ожидалась ошибка доставки, получено: %v", err)
+		}
+
+		fresh := todotest.NewTask(t, testOwner, testNow)
+		queueTask(t, pool, fresh)
+
+		taken := takeAll(t, queue)
+		if len(taken) != 1 {
+			t.Fatalf("взято %d сообщений, ожидалось 1: неудачное утащило за собой свежее", len(taken))
+		}
+		if taken[0].AggregateID != fresh.ID().String() {
+			t.Errorf("доставлено сообщение задачи %s, ожидалась %s",
+				taken[0].AggregateID, fresh.ID())
+		}
+
+		// И оно не потеряно: когда свежих не осталось, очередь возвращается
+		// к нему. Пропускать — не то же самое, что выбрасывать.
+		again := takeAll(t, queue)
+		if len(again) != 1 {
+			t.Fatalf("взято %d сообщений, ожидалось 1: пропущенное сообщение потерялось", len(again))
+		}
+		if again[0].AggregateID != stuck.ID().String() {
+			t.Errorf("доставлено сообщение задачи %s, ожидалась %s",
+				again[0].AggregateID, stuck.ID())
+		}
+	})
+
+	t.Run("причина отказа доставки не теряется, когда её не удалось записать", func(t *testing.T) {
+		t.Parallel()
+
+		// Отметка о неудаче и сама неудача — разные вещи, и провалиться
+		// может любая. Останься наружу только «не удалось отметить», причина,
+		// по которой шина отказала, не попала бы ни в лог, ни в таблицу:
+		// откат снимает и запись attempts с last_error.
+		pool := newPool(t)
+		queueTask(t, pool, todotest.NewTask(t, testOwner, testNow))
+
+		ctx, cancel := context.WithCancel(t.Context())
+		deliveryErr := errors.New("шина отказала")
+
+		_, err := postgres.NewQueue(pool).Take(ctx, 10,
+			func(context.Context, []outbox.Message) error {
+				// Отмена рушит саму отметку: транзакции больше нечем ни
+				// писать, ни фиксироваться.
+				cancel()
+				return deliveryErr
+			})
+
+		if err == nil {
+			t.Fatal("Take(...) не вернул ошибки")
+		}
+		if !strings.Contains(err.Error(), deliveryErr.Error()) {
+			t.Errorf("ошибка %q не объясняет, почему доставка не удалась", err)
 		}
 	})
 
