@@ -58,6 +58,9 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 	if err != nil {
 		return todo.TaskID{}, err
 	}
+	if err := checkIdempotencyKey(cmd.IdempotencyKey); err != nil {
+		return todo.TaskID{}, err
+	}
 
 	// Момент берётся один раз и служит и сроку, и самой задаче: иначе срок
 	// проверялся бы относительно одного «сейчас», а записывался при другом.
@@ -457,6 +460,31 @@ func parseOptionalPriority(s string) (todo.Priority, error) {
 		return todo.PriorityNormal, nil
 	}
 	return todo.ParsePriority(s)
+}
+
+// MaxIdempotencyKeyLength — потолок длины ключа идемпотентности в байтах.
+//
+// В байтах, а не в рунах: ключ — непрозрачный жетон, а не человеческий текст,
+// и считать в нём буквы незачем. Число взято тем же способом, что и потолки
+// домена, — с запасом над законным употреблением: ключом служит UUID или
+// хеш, то есть десятки символов, а 255 берут и Stripe, и черновик IETF.
+const MaxIdempotencyKeyLength = 255
+
+// checkIdempotencyKey отвергает непомерный ключ до того, как тот доберётся
+// до хранилища.
+//
+// Потолок нужен по той же причине, по какой он есть у заголовка задачи:
+// строка приходит от клиента, а уезжает в хранилище — под замок, которым
+// разводятся повторы. Без потолка ключ в несколько килобайт возвращался бы
+// отказом хранилища, то есть 500 и записью в счётчике 5xx за испорченный
+// клиентом запрос. Пустой ключ законен: он означает, что защиты от дубля
+// не просили.
+func checkIdempotencyKey(key string) error {
+	if len(key) > MaxIdempotencyKeyLength {
+		return fmt.Errorf("app: check idempotency key (length %d, max %d): %w",
+			len(key), MaxIdempotencyKeyLength, ErrIdempotencyKeyTooLong)
+	}
+	return nil
 }
 
 // resolveDueDate превращает присланный момент в срок уже существующей задачи.

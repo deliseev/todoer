@@ -304,6 +304,18 @@ func TestCreateTask(t *testing.T) {
 
 		requireStatus(t, rec, http.StatusConflict)
 	})
+
+	t.Run("непомерный ключ — негодный запрос", func(t *testing.T) {
+		// В отличие от переиспользованного, этот ключ негоден сам по себе:
+		// чинить клиенту надо не ключ в чужой задаче, а собственный запрос.
+		service := newFakeService()
+		service.createErr = fmt.Errorf("app: create task: %w", app.ErrIdempotencyKeyTooLong)
+
+		rec := do(t, newTestServer(t, service), http.MethodPost, "/tasks",
+			`{"title":"Купить молоко"}`)
+
+		requireStatus(t, rec, http.StatusBadRequest)
+	})
 }
 
 func TestGetTask(t *testing.T) {

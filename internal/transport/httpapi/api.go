@@ -528,9 +528,10 @@ func statusFor(err error) int {
 		errors.Is(err, todo.ErrDueDateInPast),
 		errors.Is(err, todo.ErrUnknownPriority),
 		errors.Is(err, todo.ErrUnknownStatus),
-		errors.Is(err, app.ErrEmptyUpdate):
-		// Негодный ввод: команда не разобралась в значимые объекты домена
-		// либо не несёт ни одного поля. Сентинели перечислены поимённо, а не
+		errors.Is(err, app.ErrEmptyUpdate),
+		errors.Is(err, app.ErrIdempotencyKeyTooLong):
+		// Негодный ввод: команда не разобралась в значимые объекты домена,
+		// не несёт ни одного поля либо пришла с непомерным ключом. Сентинели перечислены поимённо, а не
 		// сведены к правилу «всё из todo — 400»: конфликт состояния приходит
 		// оттуда же, и такое правило отвечало бы на него 400 вместо 409.
 		return http.StatusBadRequest

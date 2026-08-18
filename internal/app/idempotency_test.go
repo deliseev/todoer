@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/deliseev/todoer/internal/app"
@@ -183,6 +184,40 @@ func TestCreateTaskIsIdempotent(t *testing.T) {
 		}
 		if _, ok := env.repo.stored(id); !ok {
 			t.Error("задача не сохранена: ключ остался занятым после негодной команды")
+		}
+	})
+
+	t.Run("непомерный ключ отвергается до работы", func(t *testing.T) {
+		// Ключ приходит от клиента и ложится в хранилище под замок, а замок
+		// не резиновый. Без потолка непомерный ключ доходил бы до записи и
+		// возвращался отказом хранилища — то есть 500 за то, что испортил
+		// клиент, да ещё и в счётчике 5xx.
+		env := newTestEnv(t)
+
+		long := keyedCommand(strings.Repeat("k", app.MaxIdempotencyKeyLength+1))
+
+		_, err := env.service.CreateTask(t.Context(), long)
+
+		if !errors.Is(err, app.ErrIdempotencyKeyTooLong) {
+			t.Fatalf("ожидалась ErrIdempotencyKeyTooLong, получено: %v", err)
+		}
+		if saves := env.repo.saveCount(); saves != 0 {
+			t.Errorf("записей в хранилище %d, ожидалось 0: негодный ключ дошёл до работы", saves)
+		}
+	})
+
+	t.Run("ключ ровно в потолок проходит", func(t *testing.T) {
+		// Граница с обеих сторон: потолок обязан быть достижимым, иначе
+		// проверка отвергает законный ключ на единицу короче непомерного.
+		env := newTestEnv(t)
+
+		id, err := env.service.CreateTask(t.Context(),
+			keyedCommand(strings.Repeat("k", app.MaxIdempotencyKeyLength)))
+		if err != nil {
+			t.Fatalf("CreateTask(...) вернул ошибку: %v", err)
+		}
+		if _, ok := env.repo.stored(id); !ok {
+			t.Error("задача не сохранена")
 		}
 	})
 }
