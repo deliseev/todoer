@@ -11,7 +11,8 @@ import (
 	"github.com/deliseev/todoer/internal/app"
 )
 
-// db — то, что умеет выполнять запросы: и пул, и транзакция.
+// db объединяет пул и транзакцию, чтобы репозиторий мог работать
+// как в изолированном чтении, так и внутри Unit of Work.
 //
 // Ради него хранилища и параметризованы: SQL у работы внутри транзакции и вне
 // её один и тот же, и раздваивать его значило бы завести две версии каждого
@@ -21,6 +22,12 @@ type db interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
+
+// Статические проверки совместимости типов:
+var (
+	_ db = (*pgxpool.Pool)(nil)
+	_ db = (pgx.Tx)(nil)
+)
 
 // UnitOfWork — реализация app.UnitOfWork поверх транзакции Postgres.
 type UnitOfWork struct {
