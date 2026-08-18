@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/domain/todo"
@@ -188,6 +189,64 @@ func TestCreateTaskIsIdempotent(t *testing.T) {
 		}
 		if _, ok := env.repo.stored(id); !ok {
 			t.Error("задача не сохранена: ключ остался занятым после негодной команды")
+		}
+	})
+
+	t.Run("повтор, доживший до своего срока, возвращает ту же задачу", func(t *testing.T) {
+		// Клиент создал задачу со сроком через минуту, ответа не дождался
+		// и повторил запрос, когда срок уже наступил. Проверка «срок в
+		// будущем» относится к созданию, а повтор ничего не создаёт: откажи
+		// мы ему, и клиент никогда бы не узнал идентификатор задачи, которая
+		// у него уже есть, — тот самый разрыв круга, ради которого на
+		// изменении живёт resolveDueDate.
+		env := newTestEnv(t)
+
+		soon := testNow.Add(time.Minute)
+		cmd := keyedCommand("key-42")
+		cmd.DueDate = &soon
+
+		first, err := env.service.CreateTask(t.Context(), cmd)
+		if err != nil {
+			t.Fatalf("CreateTask(...) вернул ошибку: %v", err)
+		}
+
+		env.clock.set(soon.Add(time.Minute))
+
+		second, err := env.service.CreateTask(t.Context(), cmd)
+		if err != nil {
+			t.Fatalf("повторный CreateTask(...) вернул ошибку: %v", err)
+		}
+
+		if second != first {
+			t.Errorf("повтор вернул задачу %s, ожидалась %s", second, first)
+		}
+		if saves := env.repo.saveCount(); saves != 1 {
+			t.Errorf("записей в хранилище %d, ожидалась 1: повтор создал дубль", saves)
+		}
+	})
+
+	t.Run("новая задача с прошедшим сроком отвергается, а ключ остаётся свободным", func(t *testing.T) {
+		// Поблажка ровно на повтор и ни на что больше: первый запрос с уже
+		// истёкшим сроком — обычная ошибка ввода, и работа откатывается
+		// целиком, вместе с занятым ключом.
+		env := newTestEnv(t)
+
+		past := testNow.Add(-time.Hour)
+		cmd := keyedCommand("key-42")
+		cmd.DueDate = &past
+
+		if _, err := env.service.CreateTask(t.Context(), cmd); !errors.Is(err, todo.ErrDueDateInPast) {
+			t.Fatalf("ожидалась ErrDueDateInPast, получено: %v", err)
+		}
+
+		// Ключ свободен: следующий запрос с ним создаёт задачу, а не получает
+		// повтор с чужим идентификатором.
+		id, err := env.service.CreateTask(t.Context(), keyedCommand("key-42"))
+		if err != nil {
+			t.Fatalf("CreateTask(...) вернул ошибку: %v", err)
+		}
+		if _, ok := env.repo.stored(id); !ok {
+			t.Error("задача не сохранена: ключ остался занятым после негодного срока")
 		}
 	})
 

@@ -156,12 +156,20 @@ func contractConcurrentReplays(t *testing.T, uow app.UnitOfWork) {
 		results = make(chan todo.TaskID, writers)
 	)
 
+	// Ключи готовятся здесь, а не в горутинах, и это не украшение: и
+	// MustTaskID, и MustOwnerID внутри testKeyFor валят тест через Fatalf,
+	// а FailNow из чужой горутины не работает — она бы просто вышла, wg
+	// дождался бы остатка, и тест сообщил бы о постороннем несовпадении
+	// вместо настоящей причины.
+	keys := make([]app.IdempotencyKey, writers)
+	for i := range keys {
+		keys[i] = testKeyFor(t, todotest.MustTaskID(t))
+	}
+
 	wg.Add(writers)
-	for range writers {
+	for _, key := range keys {
 		go func() {
 			defer wg.Done()
-
-			taskID := todotest.MustTaskID(t)
 
 			var (
 				stored   todo.TaskID
@@ -169,7 +177,7 @@ func contractConcurrentReplays(t *testing.T, uow app.UnitOfWork) {
 			)
 			err := uow.Do(t.Context(), func(ctx context.Context, tx app.Tx) error {
 				var err error
-				stored, replayed, err = tx.Keys().Reserve(ctx, testKeyFor(t, taskID))
+				stored, replayed, err = tx.Keys().Reserve(ctx, key)
 				return err
 			})
 			if err != nil {

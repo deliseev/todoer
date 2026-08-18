@@ -66,16 +66,7 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 	// проверялся бы относительно одного «сейчас», а записывался при другом.
 	now := s.clock.Now()
 
-	dueDate, err := parseDueDate(cmd.DueDate, now)
-	if err != nil {
-		return todo.TaskID{}, err
-	}
 	id, err := todo.NewTaskID()
-	if err != nil {
-		return todo.TaskID{}, err
-	}
-
-	task, err := todo.NewTask(id, owner, title, description, priority, dueDate, now)
 	if err != nil {
 		return todo.TaskID{}, err
 	}
@@ -88,7 +79,7 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 			stored, replayed, err := tx.Keys().Reserve(ctx, IdempotencyKey{
 				OwnerID:     owner,
 				Key:         cmd.IdempotencyKey,
-				Fingerprint: requestFingerprint(owner, title, description, priority, dueDate),
+				Fingerprint: requestFingerprint(owner, title, description, priority, cmd.DueDate),
 				TaskID:      id,
 			})
 			if err != nil {
@@ -100,6 +91,23 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 				id = stored
 				return nil
 			}
+		}
+
+		// Срок проверяется здесь, а не вместе с остальным разбором, и это
+		// единственное, что стоит открытой работы. До ответа про ключ
+		// неизвестно, создание это или повтор, а требование «срок в будущем»
+		// относится к созданию: повтор ничего не создаёт. Иначе клиент,
+		// пославший задачу со сроком через минуту и не получивший ответа,
+		// на повторе спустя две получал бы ErrDueDateInPast и никогда бы
+		// не узнал идентификатор задачи, которая у него уже есть.
+		dueDate, err := parseDueDate(cmd.DueDate, now)
+		if err != nil {
+			return err
+		}
+
+		task, err := todo.NewTask(id, owner, title, description, priority, dueDate, now)
+		if err != nil {
+			return err
 		}
 
 		// Нулевая версия подъёма: задача только что создана и в хранилище
@@ -131,7 +139,7 @@ func requestFingerprint(
 	title todo.Title,
 	description todo.Description,
 	priority todo.Priority,
-	dueDate *todo.DueDate,
+	dueDate *time.Time,
 ) []byte {
 	digest := sha256.New()
 
@@ -139,10 +147,15 @@ func requestFingerprint(
 	// и «а» + «бв» дали бы один отпечаток.
 	fmt.Fprintf(digest, "%q\n%q\n%q\n%q\n", owner, title, description, priority)
 
+	// Срок входит в отпечаток моментом, а не значимым объектом, и иначе
+	// нельзя: отпечаток нужен раньше, чем становится известно, создание это
+	// или повтор, а todo.DueDate до тех пор ещё не из чего собрать. На сам
+	// отпечаток это не влияет — значимый объект несёт тот же момент, и
+	// приведение к UTC сводит присланное в разных зонах к одному.
 	if dueDate == nil {
 		fmt.Fprint(digest, "-\n")
 	} else {
-		fmt.Fprintf(digest, "%s\n", dueDate.Time().UTC().Format(time.RFC3339Nano))
+		fmt.Fprintf(digest, "%s\n", dueDate.UTC().Format(time.RFC3339Nano))
 	}
 
 	return digest.Sum(nil)

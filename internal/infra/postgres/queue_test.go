@@ -260,8 +260,22 @@ func TestListenerWakesOnNotify(t *testing.T) {
 		t.Fatalf("Wait(...) до подписки вернул ошибку: %v", err)
 	}
 
+	// Ожидание идёт по своей отмене, и его конца дожидается уборка, стоящая
+	// раньше закрытия соединения: уборки идут в обратном порядке, а pgx.Conn
+	// не для параллельного употребления. Без этого провальный путь ниже
+	// закрывал бы соединение прямо под читающей горутиной, и вместо
+	// несработавшей побудки тест сообщал бы о гонке.
+	waitCtx, stopWait := context.WithCancel(context.WithoutCancel(t.Context()))
 	woke := make(chan error, 1)
-	go func() { woke <- listener.Wait(context.WithoutCancel(t.Context()), 10*time.Second) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		woke <- listener.Wait(waitCtx, 10*time.Second)
+	}()
+	t.Cleanup(func() {
+		stopWait()
+		<-done
+	})
 
 	// Небольшая пауза, чтобы ожидание точно началось: уведомление,
 	// отправленное раньше подписки, не повторится.
