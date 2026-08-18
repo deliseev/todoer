@@ -151,13 +151,17 @@ func TestCreateTaskIsIdempotent(t *testing.T) {
 		keysErr := errors.New("хранилище ключей недоступно")
 		env.keys.failReserve(keysErr)
 
-		id, err := env.service.CreateTask(t.Context(), keyedCommand("key-42"))
+		_, err := env.service.CreateTask(t.Context(), keyedCommand("key-42"))
 
 		if !errors.Is(err, keysErr) {
 			t.Fatalf("ожидалась ошибка хранилища ключей, получено: %v", err)
 		}
-		if _, ok := env.repo.stored(id); ok {
-			t.Error("задача сохранена, хотя ключ записать не удалось")
+		// Считаются записи, а не ищется задача по возвращённому
+		// идентификатору: сценарий вернул ошибку, идентификатор нулевой,
+		// и поиск по нему не нашёл бы ничего, что бы сервис ни сделал, —
+		// такая проверка не умеет упасть и лишь изображает покрытие.
+		if saves := env.repo.saveCount(); saves != 0 {
+			t.Errorf("записей в хранилище %d, ожидалось 0: задача сохранена, хотя ключ записать не удалось", saves)
 		}
 		if len(env.outbox.queued()) != 0 {
 			t.Errorf("в очереди %d событий, ожидалось 0", len(env.outbox.queued()))

@@ -681,6 +681,37 @@ func TestTaskMutationsRollBackOnOutboxFailure(t *testing.T) {
 	}
 }
 
+func TestTaskMutationsReportVersionConflict(t *testing.T) {
+	// Чужая запись, вклинившаяся между Get и Save, обязана дойти до
+	// вызывающего конфликтом версий: молчаливая перезапись потеряла бы
+	// чужое изменение, а вызывающий уверился бы, что его правка легла
+	// поверх актуальной задачи. Порт это обещает, и обещание проверяется
+	// на каждой мутации разом — иначе новый сценарий, написанный мимо
+	// mutate, потерял бы проверку и никто бы не заметил.
+	for _, m := range taskMutations() {
+		t.Run(m.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
+
+			// Пока сценарий держал задачу в руках, её изменил кто-то ещё.
+			env.repo.onBeforeSave(func() {
+				stale := task.Snapshot()
+				stale.Version = task.Version() + 5
+				env.repo.put(stale)
+			})
+
+			err := m.run(t.Context(), env.service, task.ID().String(), testOwner)
+
+			if !errors.Is(err, app.ErrVersionConflict) {
+				t.Fatalf("ожидалась ErrVersionConflict, получено: %v", err)
+			}
+			if got := env.outbox.queued(); len(got) != 0 {
+				t.Errorf("в очереди %d событий, ожидалось 0: несохранённая мутация о себе рассказала", len(got))
+			}
+		})
+	}
+}
+
 func TestTaskMutationsRollBackOnCancellation(t *testing.T) {
 	for _, m := range taskMutations() {
 		t.Run(m.name, func(t *testing.T) {
