@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/deliseev/todoer/internal/app"
@@ -475,4 +476,79 @@ func (c *stubClock) set(at time.Time) {
 	defer c.mu.Unlock()
 
 	c.at = at
+}
+
+// fakeQueries — записывающий двойник порта запросов.
+//
+// Он ничего не отбирает и не сортирует, и это решение, а не упрощение: работа
+// сценария — разобрать запрос, посчитать окно по часам и собрать курсор,
+// а отбор и порядок — работа хранилища, и проверяются они на живой базе.
+// Двойник, повторяющий отбор, проверял бы собственную сообразительность.
+//
+// Лимит он всё же соблюдает: «не больше limit строк» — обещание порта, и без
+// него сценарий не на чем было бы поймать на лишней строке.
+type fakeQueries struct {
+	mu     sync.Mutex
+	filter *app.TaskFilter
+	views  []app.TaskView
+	err    error
+	calls  int
+}
+
+func newFakeQueries() *fakeQueries { return &fakeQueries{} }
+
+// List запоминает фильтр и отдаёт заготовленные представления.
+func (q *fakeQueries) List(_ context.Context, filter app.TaskFilter) ([]app.TaskView, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.calls++
+	q.filter = &filter
+
+	if q.err != nil {
+		return nil, q.err
+	}
+	if len(q.views) > filter.Limit {
+		return q.views[:filter.Limit], nil
+	}
+
+	return q.views, nil
+}
+
+// lastFilter возвращает фильтр последнего обращения или валит тест.
+func (q *fakeQueries) lastFilter(t *testing.T) app.TaskFilter {
+	t.Helper()
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.filter == nil {
+		t.Fatal("сценарий не обратился к хранилищу запросов")
+	}
+
+	return *q.filter
+}
+
+// callCount возвращает число обращений.
+func (q *fakeQueries) callCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return q.calls
+}
+
+// returns задаёт, что хранилище отдаст на следующий запрос.
+func (q *fakeQueries) returns(views ...app.TaskView) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.views = views
+}
+
+// fail заставляет хранилище отвечать ошибкой.
+func (q *fakeQueries) fail(err error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.err = err
 }

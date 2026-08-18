@@ -29,6 +29,7 @@ type testEnv struct {
 	repo    *fakeRepository
 	outbox  *fakeOutbox
 	keys    *fakeKeys
+	queries *fakeQueries
 	clock   *stubClock
 }
 
@@ -43,13 +44,21 @@ func newTestEnv(t *testing.T) testEnv {
 	outbox := newFakeOutbox()
 	clock := &stubClock{at: testNow}
 	uow := newFakeUnitOfWork(repo, outbox)
+	queries := newFakeQueries()
 
-	service, err := app.NewTaskService(uow, repo, clock)
+	service, err := app.NewTaskService(uow, repo, queries, clock)
 	if err != nil {
 		t.Fatalf("NewTaskService(...) вернул ошибку: %v", err)
 	}
 
-	return testEnv{service: service, repo: repo, outbox: outbox, keys: uow.keys, clock: clock}
+	return testEnv{
+		service: service,
+		repo:    repo,
+		outbox:  outbox,
+		keys:    uow.keys,
+		queries: queries,
+		clock:   clock,
+	}
 }
 
 // seedTask кладёт в хранилище задачу указанного владельца, доведённую до

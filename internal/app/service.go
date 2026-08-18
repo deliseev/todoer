@@ -21,23 +21,30 @@ type TaskService struct {
 	// repo — для чтения. Читающему сценарию единица работы не нужна: он не
 	// пишет, не двигает версию и не порождает событий, а транзакция ради
 	// одного SELECT стоила бы дороже, чем даёт.
-	repo  Repository
-	clock Clock
+	repo Repository
+	// queries — сторона чтения списков. Отдельно от repo по той же причине,
+	// по которой порт отдельный: список не поднимает агрегат и отдаёт
+	// плоское представление.
+	queries TaskQueries
+	clock   Clock
 }
 
 // NewTaskService собирает сервис. Все зависимости обязательны.
-func NewTaskService(uow UnitOfWork, repo Repository, clock Clock) (*TaskService, error) {
+func NewTaskService(uow UnitOfWork, repo Repository, queries TaskQueries, clock Clock) (*TaskService, error) {
 	if uow == nil {
 		return nil, fmt.Errorf("app: build task service (unit of work): %w", ErrMissingDependency)
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("app: build task service (task repository): %w", ErrMissingDependency)
 	}
+	if queries == nil {
+		return nil, fmt.Errorf("app: build task service (task queries): %w", ErrMissingDependency)
+	}
 	if clock == nil {
 		return nil, fmt.Errorf("app: build task service (clock): %w", ErrMissingDependency)
 	}
 
-	return &TaskService{uow: uow, repo: repo, clock: clock}, nil
+	return &TaskService{uow: uow, repo: repo, queries: queries, clock: clock}, nil
 }
 
 // CreateTask создаёт задачу и возвращает её идентификатор.

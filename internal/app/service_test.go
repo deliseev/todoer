@@ -15,10 +15,11 @@ import (
 func TestNewTaskService(t *testing.T) {
 	repo := newFakeRepository()
 	uow := newFakeUnitOfWork(repo, newFakeOutbox())
+	queries := newFakeQueries()
 	clock := &stubClock{at: testNow}
 
 	t.Run("все зависимости на месте", func(t *testing.T) {
-		service, err := app.NewTaskService(uow, repo, clock)
+		service, err := app.NewTaskService(uow, repo, queries, clock)
 		if err != nil {
 			t.Fatalf("NewTaskService(...) вернул ошибку: %v", err)
 		}
@@ -30,19 +31,25 @@ func TestNewTaskService(t *testing.T) {
 	t.Run("единица работы обязательна", func(t *testing.T) {
 		// Nil вместо неё — изменения без атомарности: задача запишется, а
 		// событие о ней потеряется, и никто об этом не узнает.
-		if _, err := app.NewTaskService(nil, repo, clock); !errors.Is(err, app.ErrMissingDependency) {
+		if _, err := app.NewTaskService(nil, repo, queries, clock); !errors.Is(err, app.ErrMissingDependency) {
 			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
 		}
 	})
 
 	t.Run("хранилище обязательно", func(t *testing.T) {
-		if _, err := app.NewTaskService(uow, nil, clock); !errors.Is(err, app.ErrMissingDependency) {
+		if _, err := app.NewTaskService(uow, nil, queries, clock); !errors.Is(err, app.ErrMissingDependency) {
+			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
+		}
+	})
+
+	t.Run("хранилище запросов обязательно", func(t *testing.T) {
+		if _, err := app.NewTaskService(uow, repo, nil, clock); !errors.Is(err, app.ErrMissingDependency) {
 			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
 		}
 	})
 
 	t.Run("часы обязательны", func(t *testing.T) {
-		if _, err := app.NewTaskService(uow, repo, nil); !errors.Is(err, app.ErrMissingDependency) {
+		if _, err := app.NewTaskService(uow, repo, queries, nil); !errors.Is(err, app.ErrMissingDependency) {
 			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
 		}
 	})
