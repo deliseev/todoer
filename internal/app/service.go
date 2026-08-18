@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -15,25 +16,28 @@ import (
 // проверяет права на него и вызывает ровно один доменный метод. Все правила
 // остаются в домене, вся оркестровка — здесь.
 type TaskService struct {
-	repo      Repository
-	publisher EventPublisher
-	clock     Clock
+	// uow — для изменений: задача и её события обязаны записаться вместе.
+	uow UnitOfWork
+	// repo — для чтения. Читающему сценарию единица работы не нужна: он не
+	// пишет, не двигает версию и не порождает событий, а транзакция ради
+	// одного SELECT стоила бы дороже, чем даёт.
+	repo  Repository
+	clock Clock
 }
 
-// NewTaskService собирает сервис. Все зависимости обязательны: подсунуть
-// nil-публикатор вместо NopPublisher — тихо потерять события.
-func NewTaskService(repo Repository, publisher EventPublisher, clock Clock) (*TaskService, error) {
+// NewTaskService собирает сервис. Все зависимости обязательны.
+func NewTaskService(uow UnitOfWork, repo Repository, clock Clock) (*TaskService, error) {
+	if uow == nil {
+		return nil, fmt.Errorf("app: build task service (unit of work): %w", ErrMissingDependency)
+	}
 	if repo == nil {
 		return nil, fmt.Errorf("app: build task service (task repository): %w", ErrMissingDependency)
-	}
-	if publisher == nil {
-		return nil, fmt.Errorf("app: build task service (event publisher): %w", ErrMissingDependency)
 	}
 	if clock == nil {
 		return nil, fmt.Errorf("app: build task service (clock): %w", ErrMissingDependency)
 	}
 
-	return &TaskService{repo: repo, publisher: publisher, clock: clock}, nil
+	return &TaskService{uow: uow, repo: repo, clock: clock}, nil
 }
 
 // CreateTask создаёт задачу и возвращает её идентификатор.
@@ -73,15 +77,72 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 		return todo.TaskID{}, err
 	}
 
-	// Нулевая версия подъёма: задача только что создана и в хранилище
-	// ещё не бывала.
-	if err := s.repo.Save(ctx, task, 0); err != nil {
+	// Задача, событие о ней и ключ идемпотентности записываются одной работой:
+	// либо есть всё, либо не произошло ничего. Разъедься они — повтор,
+	// пришедший между двумя записями, создал бы дубль.
+	err = s.uow.Do(ctx, func(ctx context.Context, tx Tx) error {
+		if cmd.IdempotencyKey != "" {
+			stored, replayed, err := tx.Keys().Reserve(ctx, IdempotencyKey{
+				OwnerID:     owner,
+				Key:         cmd.IdempotencyKey,
+				Fingerprint: requestFingerprint(owner, title, description, priority, dueDate),
+				TaskID:      id,
+			})
+			if err != nil {
+				return err
+			}
+			// Повтор: задача создана прошлым запросом, и создавать вторую
+			// незачем — вызывающий получит идентификатор первой.
+			if replayed {
+				id = stored
+				return nil
+			}
+		}
+
+		// Нулевая версия подъёма: задача только что создана и в хранилище
+		// ещё не бывала.
+		if err := tx.Tasks().Save(ctx, task, 0); err != nil {
+			return err
+		}
+		return tx.Outbox().Add(ctx, task.PullEvents())
+	})
+	if err != nil {
 		return todo.TaskID{}, err
 	}
 
-	// Задача уже записана, и отказ доставки этого не отменяет — поэтому
-	// идентификатор возвращается вместе с ошибкой публикации.
-	return id, s.publish(ctx, id, task.PullEvents())
+	return id, nil
+}
+
+// requestFingerprint считает отпечаток запроса на создание задачи.
+//
+// Считается по разобранным значениям, а не по телу запроса, и это решение:
+// отпечаток тогда одинаков для любого транспорта, а запросы, отличающиеся
+// лишними пробелами в заголовке, домен уже свёл к одному — значит и повтором
+// они считаются правильно.
+//
+// Ключ без отпечатка защищал бы только от честного повтора: клиент, пославший
+// с тем же ключом другую задачу, получил бы в ответ чужой идентификатор и
+// решил, что создал не то, что создал.
+func requestFingerprint(
+	owner todo.OwnerID,
+	title todo.Title,
+	description todo.Description,
+	priority todo.Priority,
+	dueDate *todo.DueDate,
+) []byte {
+	digest := sha256.New()
+
+	// %q, а не голая склейка: без разделителя и экранирования «аб» + «в»
+	// и «а» + «бв» дали бы один отпечаток.
+	fmt.Fprintf(digest, "%q\n%q\n%q\n%q\n", owner, title, description, priority)
+
+	if dueDate == nil {
+		fmt.Fprint(digest, "-\n")
+	} else {
+		fmt.Fprintf(digest, "%s\n", dueDate.Time().UTC().Format(time.RFC3339Nano))
+	}
+
+	return digest.Sum(nil)
 }
 
 // GetTask читает задачу владельца.
@@ -90,7 +151,12 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd CreateTaskCommand) (to
 // поэтому идёт мимо mutate: общего с изменением у них только подъём задачи,
 // и он вынесен в load.
 func (s *TaskService) GetTask(ctx context.Context, query GetTaskQuery) (TaskView, error) {
-	task, _, err := s.load(ctx, query.TaskID, query.OwnerID)
+	id, owner, err := parseIdentity(query.TaskID, query.OwnerID)
+	if err != nil {
+		return TaskView{}, err
+	}
+
+	task, _, err := load(ctx, s.repo, id, owner)
 	if err != nil {
 		return TaskView{}, err
 	}
@@ -282,7 +348,31 @@ func (s *TaskService) mutate(
 	taskID, ownerID string,
 	mutate func(task *todo.Task, now time.Time) error,
 ) error {
-	task, loadedVersion, err := s.load(ctx, taskID, ownerID)
+	// Идентификаторы разбираются до открытия работы: негодная команда не
+	// должна стоить ни чтения, ни начатой транзакции.
+	id, owner, err := parseIdentity(taskID, ownerID)
+	if err != nil {
+		return err
+	}
+
+	return s.uow.Do(ctx, func(ctx context.Context, tx Tx) error {
+		return s.apply(ctx, tx, id, owner, mutate)
+	})
+}
+
+// apply — тело изменения внутри уже открытой работы: поднять задачу, проверить
+// права, применить домен, сохранить и положить события в очередь.
+//
+// Отделено от mutate ради читаемости: снаружи видно, что изменение целиком
+// происходит в одной работе, внутри — из чего оно состоит.
+func (s *TaskService) apply(
+	ctx context.Context,
+	tx Tx,
+	id todo.TaskID,
+	owner todo.OwnerID,
+	mutate func(task *todo.Task, now time.Time) error,
+) error {
+	task, loadedVersion, err := load(ctx, tx.Tasks(), id, owner)
 	if err != nil {
 		return err
 	}
@@ -309,32 +399,41 @@ func (s *TaskService) mutate(
 
 	// Версия подъёма едет обратно нетронутой: сценарий её не вычисляет,
 	// иначе оптимистичная блокировка зависела бы от его аккуратности.
-	if err := s.repo.Save(ctx, task, loadedVersion); err != nil {
+	if err := tx.Tasks().Save(ctx, task, loadedVersion); err != nil {
 		return err
 	}
 
-	return s.publish(ctx, task.ID(), task.PullEvents())
+	return tx.Outbox().Add(ctx, task.PullEvents())
 }
 
-// load поднимает задачу владельца: разбирает идентификаторы, читает хранилище
-// и сверяет права. Общая часть чтения и изменения — и единственное место, где
-// живёт авторизация.
+// parseIdentity разбирает идентификаторы задачи и владельца.
 //
-// Вынесено из mutate ради читающих сценариев: они идут мимо mutate, и без
-// общего подъёма следующий такой сценарий списывался бы с GetTask, а однажды
-// списался бы без проверки владельца. Версия подъёма возвращается всем,
-// но нужна только пишущим — читатель её отбрасывает.
-func (s *TaskService) load(ctx context.Context, taskID, ownerID string) (*todo.Task, int, error) {
+// Отдельно от подъёма: разбор идёт до всякой работы с хранилищем, а подъём —
+// уже внутри неё. Негодная команда поэтому не стоит ни чтения, ни транзакции.
+func parseIdentity(taskID, ownerID string) (todo.TaskID, todo.OwnerID, error) {
 	id, err := todo.ParseTaskID(taskID)
 	if err != nil {
-		return nil, 0, err
+		return todo.TaskID{}, todo.OwnerID{}, err
 	}
 	owner, err := todo.ParseOwnerID(ownerID)
 	if err != nil {
-		return nil, 0, err
+		return todo.TaskID{}, todo.OwnerID{}, err
 	}
 
-	task, loadedVersion, err := s.repo.Get(ctx, id)
+	return id, owner, nil
+}
+
+// load поднимает задачу владельца из переданного хранилища и сверяет права.
+// Общая часть чтения и изменения — и единственное место, где живёт авторизация.
+//
+// Хранилище приезжает параметром, а не берётся у сервиса: изменение работает
+// внутри единицы работы (tx.Tasks()), чтение — мимо неё (s.repo), а проверка
+// владельца обязана остаться одна на оба пути. Без общего подъёма следующий
+// читающий сценарий списывался бы с GetTask, а однажды списался бы без неё.
+// Версия подъёма возвращается всем, но нужна только пишущим — читатель её
+// отбрасывает.
+func load(ctx context.Context, repo Repository, id todo.TaskID, owner todo.OwnerID) (*todo.Task, int, error) {
+	task, loadedVersion, err := repo.Get(ctx, id)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -348,33 +447,6 @@ func (s *TaskService) load(ctx context.Context, taskID, ownerID string) (*todo.T
 	}
 
 	return task, loadedVersion, nil
-}
-
-// publish отдаёт события публикатору. Неуспешная операция событий не
-// порождает, поэтому пустая партия до порта не доходит.
-//
-// Отказ доставки возвращается как EventDeliveryError: к этому моменту задача
-// уже записана, и вызывающему нужно отличать «изменения нет» от «изменение
-// состоялось, но о нём не узнали». Недоставленные события уезжают в ошибке —
-// больше их взять неоткуда, буфер агрегата уже пуст.
-//
-// Повторы и прочая политика доставки — дело реализации EventPublisher,
-// а не сценария: сценарий не знает ни во что публикует, ни сколько это стоит.
-func (s *TaskService) publish(ctx context.Context, taskID todo.TaskID, events []todo.DomainEvent) error {
-	if len(events) == 0 {
-		return nil
-	}
-	// Отмена запроса доставку не отменяет: задача уже записана, и рассказать
-	// о ней обязаны независимо от того, ждёт ли ещё ответа тот, кто её
-	// заказал. WithoutCancel убирает только отмену и срок, оставляя значения
-	// контекста — трассировку и всё, что по нему передают.
-	//
-	// Собственный срок на доставку — забота реализации: сценарий не знает,
-	// сколько она стоит, и вешать сюда произвольный таймаут не станет.
-	if err := s.publisher.Publish(context.WithoutCancel(ctx), events); err != nil {
-		return &EventDeliveryError{TaskID: taskID, Events: events, Err: err}
-	}
-	return nil
 }
 
 // parseOptionalPriority разбирает приоритет, считая пустую строку обычным:

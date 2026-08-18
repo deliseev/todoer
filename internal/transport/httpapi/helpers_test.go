@@ -101,9 +101,13 @@ func send(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	return rec
 }
 
-// ownerHeader дублирует константу транспорта: тесты живут в httpapi_test
-// и внутренностей пакета не видят — как и всякий его клиент.
-const ownerHeader = "X-Owner-ID"
+// ownerHeader и idempotencyHeader дублируют константы транспорта: тесты живут
+// в httpapi_test и внутренностей пакета не видят — как и всякий его клиент.
+// Заодно опечатка в имени заголовка перестаёт сходиться сама с собой.
+const (
+	ownerHeader       = "X-Owner-ID"
+	idempotencyHeader = "Idempotency-Key"
+)
 
 // decodeBody разбирает тело ответа в карту.
 //

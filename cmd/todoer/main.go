@@ -19,11 +19,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/deliseev/todoer/internal/app"
 	"github.com/deliseev/todoer/internal/infra"
+	"github.com/deliseev/todoer/internal/infra/outbox"
 	"github.com/deliseev/todoer/internal/infra/postgres"
 	"github.com/deliseev/todoer/internal/transport/httpapi"
 )
@@ -110,12 +112,12 @@ func databaseURL() string {
 
 // newTaskService собирает сервис на боевых реализациях портов.
 //
-// Публикатор заглушечный: шины событий ещё нет, а nil вместо него запрещён
-// конструктором — это тихая потеря событий.
-func newTaskService(repo app.Repository) (*app.TaskService, error) {
+// Изменения идут через единицу работы, чтения — мимо неё: задачу и её события
+// надо записать вместе, а прочитать задачу можно и без транзакции.
+func newTaskService(uow app.UnitOfWork, repo app.Repository) (*app.TaskService, error) {
 	return app.NewTaskService(
+		uow,
 		repo,
-		infra.NopPublisher{},
 		infra.SystemClock{},
 	)
 }
@@ -152,7 +154,7 @@ func run(ctx context.Context, out io.Writer, addr, dsn string) error {
 		return err
 	}
 
-	service, err := newTaskService(postgres.NewTaskRepository(pool))
+	service, err := newTaskService(postgres.NewUnitOfWork(pool), postgres.NewTaskRepository(pool))
 	if err != nil {
 		return fmt.Errorf("build task service: %w", err)
 	}
@@ -161,6 +163,40 @@ func run(ctx context.Context, out io.Writer, addr, dsn string) error {
 	if err != nil {
 		return fmt.Errorf("build http handler: %w", err)
 	}
+
+	// Доставщик событий работает рядом с сервером и останавливается тем же
+	// контекстом. Своя команда ему пока не нужна: выкатка одна, процесс один.
+	//
+	// Соединение слушателя закрывается после того, как доставщик остановился:
+	// defer'ы срабатывают в обратном порядке, и Wait стоит позже Close
+	// намеренно.
+	wakeups := postgres.NewListener(dsn)
+	defer wakeups.Close(context.WithoutCancel(ctx))
+
+	relay, err := outbox.NewRelay(postgres.NewQueue(pool), outbox.NopPublisher{}, wakeups)
+	if err != nil {
+		return fmt.Errorf("build outbox relay: %w", err)
+	}
+
+	// Доставщик сворачивается вместе с run, а не только по отмене снаружи.
+	// Своя отмена нужна ради ранних выходов: занятый порт возвращает ошибку,
+	// когда ctx ещё жив, и без неё горутина пережила бы функцию, которая её
+	// завела, а ожидание её завершения не кончилось бы никогда.
+	//
+	// Остановка и ожидание — в одном defer, чтобы порядок нельзя было
+	// перепутать: сначала сказать «хватит», потом дождаться.
+	relayCtx, stopRelay := context.WithCancel(ctx)
+
+	var relayed sync.WaitGroup
+	relayed.Add(1)
+	go func() {
+		defer relayed.Done()
+		relay.Run(relayCtx)
+	}()
+	defer func() {
+		stopRelay()
+		relayed.Wait()
+	}()
 
 	// Слушатель открывается до Serve, чтобы занятый порт стал ошибкой запуска,
 	// а не молчаливой смертью в горутине. Он же сообщает настоящий адрес:

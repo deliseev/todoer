@@ -85,7 +85,7 @@ func TestGetTask(t *testing.T) {
 		if env.repo.saveCount() != 0 {
 			t.Error("чтение дошло до записи")
 		}
-		if env.publisher.callCount() != 0 {
+		if len(env.outbox.queued()) != 0 {
 			t.Error("чтение породило публикацию")
 		}
 	})

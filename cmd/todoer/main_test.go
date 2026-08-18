@@ -35,7 +35,7 @@ func TestNewTaskService(t *testing.T) {
 		}
 		t.Cleanup(pool.Close)
 
-		service, err := newTaskService(postgres.NewTaskRepository(pool))
+		service, err := newTaskService(postgres.NewUnitOfWork(pool), postgres.NewTaskRepository(pool))
 		if err != nil {
 			t.Fatalf("newTaskService() вернул ошибку: %v", err)
 		}
@@ -221,6 +221,59 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("событие созданной задачи уезжает из очереди", func(t *testing.T) {
+		t.Parallel()
+
+		// Сквозная проверка доставки: сценарий кладёт событие в очередь в одной
+		// транзакции с задачей, NOTIFY будит доставщика, тот выгребает очередь
+		// и отмечает сообщение доставленным. Ни одного из трёх звеньев по
+		// отдельности для этого недостаточно.
+		dsn := pgtest.NewDSN(t)
+
+		addr, stop := start(t, dsn)
+		defer stop()
+
+		created := do(t, request(t, http.MethodPost, "http://"+addr+"/tasks",
+			`{"title":"Купить молоко"}`))
+		if created.StatusCode != http.StatusCreated {
+			t.Fatalf("код ответа на создание = %d, ожидался %d", created.StatusCode, http.StatusCreated)
+		}
+
+		waitForDelivery(t, dsn)
+	})
+
+	t.Run("повтор с ключом не создаёт вторую задачу", func(t *testing.T) {
+		t.Parallel()
+
+		// Сквозная проверка идемпотентности: ключ доезжает из заголовка до
+		// таблицы и обратно, а повтор получает ту же задачу тем же кодом.
+		dsn := pgtest.NewDSN(t)
+
+		addr, stop := start(t, dsn)
+		defer stop()
+
+		create := func() *http.Response {
+			req := request(t, http.MethodPost, "http://"+addr+"/tasks", `{"title":"Купить молоко"}`)
+			req.Header.Set("Idempotency-Key", "key-42")
+			return do(t, req)
+		}
+
+		first, second := create(), create()
+
+		if first.StatusCode != http.StatusCreated || second.StatusCode != http.StatusCreated {
+			t.Fatalf("коды ответов = %d и %d, ожидались %d",
+				first.StatusCode, second.StatusCode, http.StatusCreated)
+		}
+		if first.Header.Get("Location") != second.Header.Get("Location") {
+			t.Errorf("повтор создал другую задачу: %q и %q",
+				first.Header.Get("Location"), second.Header.Get("Location"))
+		}
+
+		if count := taskCount(t, dsn); count != 1 {
+			t.Errorf("задач в базе %d, ожидалась 1", count)
+		}
+	})
+
 	t.Run("задача переживает перезапуск", func(t *testing.T) {
 		t.Parallel()
 
@@ -269,6 +322,54 @@ func readTask(t *testing.T, dsn, location string) *http.Response {
 	defer stop()
 
 	return do(t, request(t, http.MethodGet, "http://"+addr+location, ""))
+}
+
+// taskCount считает задачи в базе.
+func taskCount(t *testing.T, dsn string) int {
+	t.Helper()
+
+	pool, err := postgres.Open(t.Context(), dsn)
+	if err != nil {
+		t.Fatalf("подключение к базе теста: %v", err)
+	}
+	defer pool.Close()
+
+	var count int
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM tasks").Scan(&count); err != nil {
+		t.Fatalf("чтение задач: %v", err)
+	}
+
+	return count
+}
+
+// waitForDelivery дожидается, пока очередь опустеет, или валит тест.
+//
+// Ожиданием, а не единичной проверкой: доставка идёт в фоне, и требовать от
+// неё успеть к моменту ответа на запрос — значит проверять расторопность
+// планировщика, а не работу доставщика.
+func waitForDelivery(t *testing.T, dsn string) {
+	t.Helper()
+
+	pool, err := postgres.Open(t.Context(), dsn)
+	if err != nil {
+		t.Fatalf("подключение к базе теста: %v", err)
+	}
+	defer pool.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var pending int
+		if err := pool.QueryRow(t.Context(),
+			"SELECT count(*) FROM outbox WHERE published_at IS NULL").Scan(&pending); err != nil {
+			t.Fatalf("чтение очереди: %v", err)
+		}
+		if pending == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("событие так и не уехало из очереди")
 }
 
 // start поднимает сервер и возвращает его адрес вместе с остановкой.

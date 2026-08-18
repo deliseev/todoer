@@ -51,12 +51,14 @@ const (
 // конфликт — сверка и запись происходят одним запросом, поэтому вклиниться
 // между ними нечему.
 type TaskRepository struct {
-	pool *pgxpool.Pool
+	// db — пул или транзакция: запросы у них одни и те же, а в транзакции
+	// хранилище работает, когда задачу пишут вместе с её событиями.
+	db db
 }
 
 // NewTaskRepository собирает хранилище поверх пула соединений.
 func NewTaskRepository(pool *pgxpool.Pool) *TaskRepository {
-	return &TaskRepository{pool: pool}
+	return &TaskRepository{db: pool}
 }
 
 // Get поднимает задачу из базы и сообщает версию, которой она пришла.
@@ -64,7 +66,7 @@ func (r *TaskRepository) Get(ctx context.Context, taskID todo.TaskID) (*todo.Tas
 	// Колонки раскладываются по полям по именам, а не по порядку: сместись
 	// список в запросе относительно структуры — будет ошибка о ненайденной
 	// колонке, а не тихо переставленные значения.
-	rows, err := r.pool.Query(ctx, selectTask, pgx.StrictNamedArgs{"id": taskID.String()})
+	rows, err := r.db.Query(ctx, selectTask, pgx.StrictNamedArgs{"id": taskID.String()})
 	if err != nil {
 		return nil, 0, fmt.Errorf("postgres: get task %s: %w", taskID, err)
 	}
@@ -122,7 +124,7 @@ func (r *TaskRepository) Save(ctx context.Context, task *todo.Task, loadedVersio
 
 // insert вставляет задачу, которой в хранилище ещё не было.
 func (r *TaskRepository) insert(ctx context.Context, taskID todo.TaskID, row taskRow) error {
-	tag, err := r.pool.Exec(ctx, insertTask, row.args())
+	tag, err := r.db.Exec(ctx, insertTask, row.args())
 	if err != nil {
 		return fmt.Errorf("postgres: insert task %s: %w", taskID, err)
 	}
@@ -143,7 +145,7 @@ func (r *TaskRepository) update(ctx context.Context, taskID todo.TaskID, row tas
 	// границе, а не в задаче.
 	args["loaded_version"] = loadedVersion
 
-	tag, err := r.pool.Exec(ctx, updateTask, args)
+	tag, err := r.db.Exec(ctx, updateTask, args)
 	if err != nil {
 		return fmt.Errorf("postgres: save task %s: %w", taskID, err)
 	}
@@ -169,7 +171,7 @@ func (r *TaskRepository) update(ctx context.Context, taskID todo.TaskID, row tas
 func (r *TaskRepository) storedVersion(ctx context.Context, taskID todo.TaskID) string {
 	var version int
 
-	err := r.pool.QueryRow(ctx, selectVersion, pgx.StrictNamedArgs{"id": taskID.String()}).Scan(&version)
+	err := r.db.QueryRow(ctx, selectVersion, pgx.StrictNamedArgs{"id": taskID.String()}).Scan(&version)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return "not stored anymore"

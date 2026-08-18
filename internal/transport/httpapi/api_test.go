@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -260,26 +261,48 @@ func TestCreateTask(t *testing.T) {
 		}
 	})
 
-	t.Run("отказ доставки событий — всё равно успех", func(t *testing.T) {
-		// Задача записана и видна всем, кто её прочтёт. 5xx заставил бы
-		// клиента повторить запись, которая уже состоялась, а POST /tasks
-		// неидемпотентен — на повторе появилась бы вторая задача.
-		// Отказ доставки уезжает в лог, а не в ответ.
+	t.Run("ключ идемпотентности уезжает в команду", func(t *testing.T) {
+		// Транспорт про повторы ничего не решает: он только переносит ключ
+		// в команду, а отличать повтор от нового запроса — работа сценария.
 		service := newFakeService()
 		service.createID = mustTaskID(t)
-		service.view = testView()
-		service.createErr = &app.EventDeliveryError{
-			TaskID: service.createID,
-			Err:    errors.New("publisher: unavailable"),
+
+		req := newRequest(t, http.MethodPost, "/tasks", `{"title":"Купить молоко"}`)
+		req.Header.Set(ownerHeader, testOwner)
+		req.Header.Set(idempotencyHeader, "  key-42  ")
+
+		rec := send(newTestServer(t, service), req)
+
+		requireStatus(t, rec, http.StatusCreated)
+		// Пробелы по краям срезаны: пустой заголовок равен отсутствующему.
+		if got := service.createCmd.IdempotencyKey; got != "key-42" {
+			t.Errorf("ключ в команде = %q, ожидался %q", got, "key-42")
 		}
+	})
+
+	t.Run("без заголовка ключа команда идёт без него", func(t *testing.T) {
+		service := newFakeService()
+		service.createID = mustTaskID(t)
 
 		rec := do(t, newTestServer(t, service), http.MethodPost, "/tasks",
 			`{"title":"Купить молоко"}`)
 
 		requireStatus(t, rec, http.StatusCreated)
-		if want := "/tasks/" + service.createID.String(); rec.Header().Get("Location") != want {
-			t.Errorf("Location = %q, ожидался %q", rec.Header().Get("Location"), want)
+		if got := service.createCmd.IdempotencyKey; got != "" {
+			t.Errorf("ключ в команде = %q, ожидался пустой", got)
 		}
+	})
+
+	t.Run("переиспользованный ключ — конфликт", func(t *testing.T) {
+		// Сам запрос безупречен, и тот же запрос с другим ключом прошёл бы:
+		// это конфликт с уже случившимся, а не негодный ввод.
+		service := newFakeService()
+		service.createErr = fmt.Errorf("app: create task: %w", app.ErrIdempotencyKeyReused)
+
+		rec := do(t, newTestServer(t, service), http.MethodPost, "/tasks",
+			`{"title":"Купить молоко"}`)
+
+		requireStatus(t, rec, http.StatusConflict)
 	})
 }
 

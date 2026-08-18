@@ -39,6 +39,16 @@ import (
 // потом можно только сломав все ссылки.
 const ownerHeader = "X-Owner-ID"
 
+// idempotencyHeader — заголовок, которым клиент отличает повтор запроса от
+// нового запроса.
+//
+// Необязательный: есть ключ — повтор вернёт ту же задачу, нет ключа —
+// поведение прежнее. Так устроены Stripe и черновик IETF, и так не ломаются
+// клиенты, которые про идемпотентность не знают. Заголовком, а не полем тела:
+// это свойство доставки запроса, а не часть задачи, и попади оно в тело —
+// уехало бы в отпечаток самого себя.
+const idempotencyHeader = "Idempotency-Key"
+
 // TaskService — то, что транспорту нужно от слоя сценариев.
 //
 // Интерфейс объявлен у потребителя, как и порты в app: транспорту не нужен
@@ -155,8 +165,11 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request, owner strin
 		Description: req.Description,
 		Priority:    req.Priority,
 		DueDate:     req.DueDate,
+		// Пробелы по краям срезаются, как и у владельца: пустой заголовок
+		// равен отсутствующему.
+		IdempotencyKey: strings.TrimSpace(r.Header.Get(idempotencyHeader)),
 	})
-	if !written(err) {
+	if err != nil {
 		failure(w, err)
 		return
 	}
@@ -164,6 +177,11 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request, owner strin
 	// Location указывает на созданный ресурс, тело несёт тот же идентификатор:
 	// заголовок — для клиента, ходящего по ссылкам, поле — для того, кто
 	// разбирает JSON, и разбирать Location ради идентификатора ему не нужно.
+	//
+	// Повтор с ключом идемпотентности отвечает тем же 201 и тем же Location.
+	// Не 200: клиент не обязан различать, которая из его попыток создала
+	// задачу, а разные коды на один и тот же результат — приглашение
+	// ветвиться на ровном месте.
 	w.Header().Set("Location", "/tasks/"+id.String())
 	writeJSON(w, http.StatusCreated, createdResponse{ID: id.String()})
 }
@@ -214,7 +232,7 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request, owner strin
 		Description: req.Description,
 		Priority:    req.Priority,
 		DueDate:     dueDate,
-	}); !written(err) {
+	}); err != nil {
 		failure(w, err)
 		return
 	}
@@ -252,11 +270,11 @@ type statusAction func(ctx context.Context, taskID, owner string) error
 // changeStatus — общий хвост трёх действий над статусом.
 //
 // Тела у этих запросов нет, разбирать нечего, и различаются они одним вызовом
-// сценария. Расписывать вокруг него одно и то же трижды нельзя: так теряются
-// то разбор отказа доставки, то перечитывание задачи в ответ.
+// сценария. Расписывать вокруг него одно и то же трижды нельзя: так теряется
+// то перевод отказа в код, то перечитывание задачи в ответ.
 func (h *Handler) changeStatus(w http.ResponseWriter, r *http.Request, owner string, action statusAction) {
 	taskID := r.PathValue("id")
-	if err := action(r.Context(), taskID, owner); !written(err) {
+	if err := action(r.Context(), taskID, owner); err != nil {
 		failure(w, err)
 		return
 	}
@@ -447,20 +465,6 @@ type errorResponse struct {
 
 // Общий хвост записи и перевод ошибок в коды.
 
-// written сообщает, состоялась ли запись, и уводит отказ доставки в лог.
-//
-// Отказ доставки — всё равно успех: задача записана и видна всем, кто её
-// прочтёт. 5xx заставил бы клиента повторить запись, которая уже состоялась,
-// а POST /tasks вдобавок неидемпотентен — на повторе появилась бы вторая
-// задача. Да и повтор ничего не доставил бы: для этого нужен outbox.
-func written(err error) bool {
-	if delivery, ok := errors.AsType[*app.EventDeliveryError](err); ok {
-		slog.Error("deliver task events", "task", delivery.TaskID, "error", delivery.Err)
-		return true
-	}
-	return err == nil
-}
-
 // respondTask отвечает задачей, перечитав её после успешной записи.
 //
 // Мутирующие сценарии возвращают только ошибку, поэтому ответ стоит лишнего
@@ -503,6 +507,10 @@ func statusFor(err error) int {
 	case errors.Is(err, app.ErrTaskNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, app.ErrVersionConflict):
+		return http.StatusConflict
+	case errors.Is(err, app.ErrIdempotencyKeyReused):
+		// Конфликт, а не негодный запрос: сам по себе он безупречен, и тот же
+		// запрос с другим ключом прошёл бы.
 		return http.StatusConflict
 	case errors.Is(err, todo.ErrInvalidStatusTransition),
 		errors.Is(err, todo.ErrTaskAlreadyCompleted),

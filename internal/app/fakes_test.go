@@ -1,9 +1,12 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -169,6 +172,22 @@ func (r *fakeRepository) stored(id todo.TaskID) (todo.TaskSnapshot, bool) {
 	return snapshot, ok
 }
 
+// copyTasks снимает копию хранилища для возможного отката.
+func (r *fakeRepository) copyTasks() map[string]todo.TaskSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return maps.Clone(r.tasks)
+}
+
+// restoreTasks возвращает хранилище к снятому снимку.
+func (r *fakeRepository) restoreTasks(tasks map[string]todo.TaskSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.tasks = tasks
+}
+
 // put кладёт снимок в обход проверки версий — так тест изображает запись,
 // сделанную кем-то другим между Get и Save сценария.
 func (r *fakeRepository) put(snapshot todo.TaskSnapshot) {
@@ -194,81 +213,245 @@ func (r *fakeRepository) saveCount() int {
 	return r.saves
 }
 
-// recordingPublisher запоминает всё, что сценарии отдали на публикацию.
-type recordingPublisher struct {
+// fakeUnitOfWork — единица работы в памяти.
+//
+// Атомарность изображается снимком состояния до работы: отказ или паника
+// возвращают хранилище и очередь к нему. Настоящая транзакция делает то же
+// самое, только руками базы, и подменять здесь правило упрощённым нельзя —
+// двойник перестал бы ловить то, на чём споткнётся оригинал.
+type fakeUnitOfWork struct {
+	// mu держится всю работу: единица работы на то и единица, чтобы чужая
+	// запись не вклинилась в середину.
+	mu     sync.Mutex
+	repo   *fakeRepository
+	outbox *fakeOutbox
+	keys   *fakeKeys
+}
+
+func newFakeUnitOfWork(repo *fakeRepository, outbox *fakeOutbox) *fakeUnitOfWork {
+	return &fakeUnitOfWork{repo: repo, outbox: outbox, keys: newFakeKeys()}
+}
+
+// Do выполняет работу и фиксирует её результат.
+func (u *fakeUnitOfWork) Do(ctx context.Context, work func(ctx context.Context, tx app.Tx) error) error {
+	// Отменённому запросу незачем начинать работу, чтобы узнать, что он
+	// никому не нужен.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	tasks, events, keys := u.repo.copyTasks(), u.outbox.copyEvents(), u.keys.copyKeys()
+
+	// Откат снимается только после успеха, поэтому defer возвращает состояние
+	// и когда работа вернула ошибку, и когда она вышла паникой.
+	committed := false
+	defer func() {
+		if !committed {
+			u.repo.restoreTasks(tasks)
+			u.outbox.restoreEvents(events)
+			u.keys.restoreKeys(keys)
+		}
+	}()
+
+	if err := work(ctx, fakeTx{repo: u.repo, outbox: u.outbox, keys: u.keys}); err != nil {
+		return err
+	}
+
+	committed = true
+	return nil
+}
+
+// fakeTx — доступ к хранилищам внутри работы.
+type fakeTx struct {
+	repo   *fakeRepository
+	outbox *fakeOutbox
+	keys   *fakeKeys
+}
+
+// Tasks отдаёт хранилище задач.
+func (tx fakeTx) Tasks() app.Repository { return tx.repo }
+
+// Outbox отдаёт исходящую очередь событий.
+func (tx fakeTx) Outbox() app.Outbox { return tx.outbox }
+
+// Keys отдаёт хранилище ключей идемпотентности.
+func (tx fakeTx) Keys() app.IdempotencyStore { return tx.keys }
+
+// fakeKeys — хранилище ключей идемпотентности в памяти.
+//
+// Замок здесь мьютекс единицы работы, у настоящего хранилища — уникальный
+// индекс, но правило одно: закрепить ключ вправе ровно один запрос.
+type fakeKeys struct {
+	mu   sync.Mutex
+	keys map[string]app.IdempotencyKey
+
+	// reserveErr подменяет результат порта, чтобы проверить поведение
+	// сценария при отказе хранилища ключей.
+	reserveErr error
+}
+
+func newFakeKeys() *fakeKeys {
+	return &fakeKeys{keys: make(map[string]app.IdempotencyKey)}
+}
+
+// Reserve закрепляет ключ за задачей или сообщает о повторе.
+func (k *fakeKeys) Reserve(ctx context.Context, key app.IdempotencyKey) (todo.TaskID, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return todo.TaskID{}, false, err
+	}
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	if k.reserveErr != nil {
+		return todo.TaskID{}, false, k.reserveErr
+	}
+
+	slot := key.OwnerID.String() + "\x00" + key.Key
+
+	stored, taken := k.keys[slot]
+	if !taken {
+		k.keys[slot] = key
+		return key.TaskID, false, nil
+	}
+
+	// Тот же ключ с другим содержимым — не повтор: клиент спросил о другом.
+	if !bytes.Equal(stored.Fingerprint, key.Fingerprint) {
+		return todo.TaskID{}, false, fmt.Errorf("fake: reserve key %s (task %s): %w",
+			key.Key, stored.TaskID, app.ErrIdempotencyKeyReused)
+	}
+
+	return stored.TaskID, true, nil
+}
+
+// failReserve заставляет хранилище ключей отказывать.
+func (k *fakeKeys) failReserve(err error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	k.reserveErr = err
+}
+
+// copyKeys снимает копию хранилища для возможного отката.
+func (k *fakeKeys) copyKeys() map[string]app.IdempotencyKey {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	return maps.Clone(k.keys)
+}
+
+// restoreKeys возвращает хранилище к снятому снимку.
+func (k *fakeKeys) restoreKeys(keys map[string]app.IdempotencyKey) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	k.keys = keys
+}
+
+// fakeOutbox — исходящая очередь в памяти.
+type fakeOutbox struct {
 	mu     sync.Mutex
 	events []todo.DomainEvent
-	calls  int
-	err    error
-	// sawEmpty отмечает публикацию пустой партии: успешная мутация всегда
-	// порождает событие, поэтому дёргать публикатор впустую сценарию незачем.
+
+	// addErr подменяет результат порта, чтобы проверить поведение сценария
+	// при отказе очереди.
+	addErr error
+
+	// sawEmpty отмечает запись пустой партии: состоявшаяся мутация всегда
+	// порождает событие, поэтому дёргать очередь впустую сценарию незачем.
 	sawEmpty bool
-	// ctxErr — состояние контекста на момент вызова. Сам контекст в поле
-	// не кладём: он живёт ровно столько, сколько вызов.
-	ctxErr error
+
+	// adds считает обращения к очереди: команда, изменившая несколько полей,
+	// обязана положить события одной порцией, а не бегать сюда за каждым.
+	adds int
 }
 
-// Publish запоминает партию событий.
-func (p *recordingPublisher) Publish(ctx context.Context, events []todo.DomainEvent) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func newFakeOutbox() *fakeOutbox {
+	return &fakeOutbox{}
+}
 
-	p.calls++
-	p.ctxErr = ctx.Err()
-	if len(events) == 0 {
-		p.sawEmpty = true
+// Add кладёт события в очередь.
+func (o *fakeOutbox) Add(ctx context.Context, events []todo.DomainEvent) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	p.events = append(p.events, events...)
 
-	return p.err
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.adds++
+
+	if o.addErr != nil {
+		return o.addErr
+	}
+	// Пустая партия — корректный вход: очередь не место, где решают, что
+	// считать изменением. Но сценарию сюда с ней ходить незачем, и тест
+	// это замечает.
+	if len(events) == 0 {
+		o.sawEmpty = true
+	}
+	o.events = append(o.events, events...)
+
+	return nil
 }
 
-// failWith заставляет публикатор отказывать.
-func (p *recordingPublisher) failWith(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// failAdd заставляет очередь отказывать на записи.
+func (o *fakeOutbox) failAdd(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 
-	p.err = err
+	o.addErr = err
 }
 
-// published возвращает имена опубликованных событий в порядке публикации.
-func (p *recordingPublisher) published() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// queued возвращает имена событий в очереди в порядке записи.
+func (o *fakeOutbox) queued() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 
-	return todotest.EventNames(p.events)
+	return todotest.EventNames(o.events)
 }
 
-// eventAt возвращает опубликованное событие по его порядковому номеру.
-func (p *recordingPublisher) eventAt(i int) todo.DomainEvent {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// addCount возвращает число обращений к очереди.
+func (o *fakeOutbox) addCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 
-	return p.events[i]
+	return o.adds
 }
 
-// callCount возвращает число обращений к публикатору.
-func (p *recordingPublisher) callCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// sawEmptyBatch сообщает, что очередь хотя бы раз получила пустую партию.
+func (o *fakeOutbox) sawEmptyBatch() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 
-	return p.calls
+	return o.sawEmpty
 }
 
-// contextErr возвращает состояние контекста на момент последнего вызова.
-func (p *recordingPublisher) contextErr() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// eventAt возвращает событие очереди по его порядковому номеру.
+func (o *fakeOutbox) eventAt(i int) todo.DomainEvent {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 
-	return p.ctxErr
+	return o.events[i]
 }
 
-// sawEmptyBatch сообщает, что публикатор хотя бы раз получил пустую партию.
-func (p *recordingPublisher) sawEmptyBatch() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// copyEvents снимает копию очереди для возможного отката.
+func (o *fakeOutbox) copyEvents() []todo.DomainEvent {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 
-	return p.sawEmpty
+	return slices.Clone(o.events)
+}
+
+// restoreEvents возвращает очередь к снятому снимку.
+func (o *fakeOutbox) restoreEvents(events []todo.DomainEvent) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.events = events
 }
 
 // stubClock — управляемые часы. Тесты двигают их вручную, поэтому «сейчас»

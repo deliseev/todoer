@@ -14,11 +14,11 @@ import (
 
 func TestNewTaskService(t *testing.T) {
 	repo := newFakeRepository()
-	publisher := &recordingPublisher{}
+	uow := newFakeUnitOfWork(repo, newFakeOutbox())
 	clock := &stubClock{at: testNow}
 
 	t.Run("все зависимости на месте", func(t *testing.T) {
-		service, err := app.NewTaskService(repo, publisher, clock)
+		service, err := app.NewTaskService(uow, repo, clock)
 		if err != nil {
 			t.Fatalf("NewTaskService(...) вернул ошибку: %v", err)
 		}
@@ -27,21 +27,22 @@ func TestNewTaskService(t *testing.T) {
 		}
 	})
 
-	t.Run("хранилище обязательно", func(t *testing.T) {
-		if _, err := app.NewTaskService(nil, publisher, clock); !errors.Is(err, app.ErrMissingDependency) {
+	t.Run("единица работы обязательна", func(t *testing.T) {
+		// Nil вместо неё — изменения без атомарности: задача запишется, а
+		// событие о ней потеряется, и никто об этом не узнает.
+		if _, err := app.NewTaskService(nil, repo, clock); !errors.Is(err, app.ErrMissingDependency) {
 			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
 		}
 	})
 
-	t.Run("публикатор обязателен", func(t *testing.T) {
-		// Nil вместо NopPublisher — тихая потеря событий, поэтому запрещён явно.
-		if _, err := app.NewTaskService(repo, nil, clock); !errors.Is(err, app.ErrMissingDependency) {
+	t.Run("хранилище обязательно", func(t *testing.T) {
+		if _, err := app.NewTaskService(uow, nil, clock); !errors.Is(err, app.ErrMissingDependency) {
 			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
 		}
 	})
 
 	t.Run("часы обязательны", func(t *testing.T) {
-		if _, err := app.NewTaskService(repo, publisher, nil); !errors.Is(err, app.ErrMissingDependency) {
+		if _, err := app.NewTaskService(uow, repo, nil); !errors.Is(err, app.ErrMissingDependency) {
 			t.Fatalf("ожидалась ErrMissingDependency, получено: %v", err)
 		}
 	})
@@ -184,13 +185,13 @@ func TestCreateTask(t *testing.T) {
 			t.Fatalf("CreateTask(...) вернул ошибку: %v", err)
 		}
 
-		if got := env.publisher.published(); len(got) != 1 || got[0] != todo.EventTaskCreated {
+		if got := env.outbox.queued(); len(got) != 1 || got[0] != todo.EventTaskCreated {
 			t.Fatalf("опубликованы события %v, ожидалось [%s]", got, todo.EventTaskCreated)
 		}
 
-		created, ok := env.publisher.eventAt(0).(todo.TaskCreated)
+		created, ok := env.outbox.eventAt(0).(todo.TaskCreated)
 		if !ok {
-			t.Fatalf("тип события %T, ожидался todo.TaskCreated", env.publisher.eventAt(0))
+			t.Fatalf("тип события %T, ожидался todo.TaskCreated", env.outbox.eventAt(0))
 		}
 		if created.AggregateID() != id {
 			t.Errorf("событие о задаче %s, ожидалась %s", created.AggregateID(), id)
@@ -209,46 +210,30 @@ func TestCreateTask(t *testing.T) {
 		if !errors.Is(err, saveErr) {
 			t.Fatalf("ожидалась ошибка хранилища, получено: %v", err)
 		}
-		// Отказ записи и отказ доставки — разные беды с разными последствиями,
-		// и вызывающий обязан их различать: здесь задачи нет вовсе.
-		if errors.Is(err, app.ErrEventDeliveryFailed) {
-			t.Error("отказ хранилища выдан за отказ доставки")
-		}
-		if env.publisher.callCount() != 0 {
-			t.Errorf("публикатор вызван %d раз, ожидалось 0", env.publisher.callCount())
+		if len(env.outbox.queued()) != 0 {
+			t.Errorf("в очереди %d событий, ожидалось 0", len(env.outbox.queued()))
 		}
 	})
 
-	t.Run("ошибка публикации доходит до вызывающего", func(t *testing.T) {
+	t.Run("отказ очереди откатывает задачу", func(t *testing.T) {
+		// То, ради чего заведена единица работы. Раньше задача оставалась
+		// записанной, а событие о ней терялось, и вызывающему возвращали
+		// «создано, но не доставлено». Теперь событие пишется вместе с задачей,
+		// поэтому отказ очереди отменяет и её: рассказать об изменении нечем —
+		// значит изменения не было.
 		env := newTestEnv(t)
-		publishErr := errors.New("шина недоступна")
-		env.publisher.failWith(publishErr)
+		outboxErr := errors.New("очередь недоступна")
+		env.outbox.failAdd(outboxErr)
 
 		id, err := env.service.CreateTask(t.Context(), validCommand())
-		if !errors.Is(err, publishErr) {
-			t.Fatalf("ожидалась ошибка публикации, получено: %v", err)
+		if !errors.Is(err, outboxErr) {
+			t.Fatalf("ожидалась ошибка очереди, получено: %v", err)
 		}
-		// Отказ доставки помечен сентинелью: по ней транспорт отличит
-		// «задача не создана» от «создана, но событие не ушло».
-		if !errors.Is(err, app.ErrEventDeliveryFailed) {
-			t.Errorf("ошибка не помечена ErrEventDeliveryFailed: %v", err)
+		if _, ok := env.repo.stored(id); ok {
+			t.Error("задача сохранена, хотя событие о ней записать не удалось")
 		}
-
-		// PullEvents уже опустошил буфер агрегата, а сам агрегат сейчас
-		// исчезнет. Не отдай ошибка события наружу — их не осталось бы нигде.
-		var deliveryErr *app.EventDeliveryError
-		if !errors.As(err, &deliveryErr) {
-			t.Fatalf("ошибка не несёт недоставленные события: %v", err)
-		}
-		if deliveryErr.TaskID != id {
-			t.Errorf("ошибка о задаче %s, ожидалась %s", deliveryErr.TaskID, id)
-		}
-		if got := todotest.EventNames(deliveryErr.Events); len(got) != 1 || got[0] != todo.EventTaskCreated {
-			t.Errorf("не доставлены события %v, ожидалось [%s]", got, todo.EventTaskCreated)
-		}
-		// Задача при этом уже сохранена: отказ доставки не отменяет записи.
-		if _, ok := env.repo.stored(id); !ok {
-			t.Error("задача не сохранена, хотя Save отработал")
+		if len(env.outbox.queued()) != 0 {
+			t.Errorf("в очереди %d событий, ожидалось 0", len(env.outbox.queued()))
 		}
 	})
 
@@ -315,7 +300,7 @@ func TestCreateTask(t *testing.T) {
 				if env.repo.saveCount() != 0 {
 					t.Error("некорректная команда дошла до хранилища")
 				}
-				if env.publisher.callCount() != 0 {
+				if len(env.outbox.queued()) != 0 {
 					t.Error("некорректная команда породила публикацию")
 				}
 			})
@@ -430,7 +415,7 @@ func TestTaskMutationsSuccess(t *testing.T) {
 			if !snapshot.UpdatedAt.Equal(testLater) {
 				t.Errorf("updatedAt = %s, ожидалось %s", snapshot.UpdatedAt, testLater)
 			}
-			if got := env.publisher.published(); len(got) != 1 || got[0] != m.event {
+			if got := env.outbox.queued(); len(got) != 1 || got[0] != m.event {
 				t.Errorf("опубликованы события %v, ожидалось [%s]", got, m.event)
 			}
 		})
@@ -464,7 +449,7 @@ func TestTaskMutationsWithoutChangeSkipWrite(t *testing.T) {
 		if got := env.repo.saveCount(); got != 0 {
 			t.Errorf("записей %d, ожидалось 0", got)
 		}
-		if got := env.publisher.callCount(); got != 0 {
+		if got := len(env.outbox.queued()); got != 0 {
 			t.Errorf("обращений к публикатору %d, ожидалось 0", got)
 		}
 	})
@@ -525,7 +510,7 @@ func TestTaskMutationsRejectForeignOwner(t *testing.T) {
 			if env.repo.saveCount() != 0 {
 				t.Error("чужая команда дошла до хранилища")
 			}
-			if env.publisher.callCount() != 0 {
+			if len(env.outbox.queued()) != 0 {
 				t.Error("чужая команда породила публикацию")
 			}
 		})
@@ -542,7 +527,7 @@ func TestTaskMutationsOnMissingTask(t *testing.T) {
 			if !errors.Is(err, app.ErrTaskNotFound) {
 				t.Fatalf("ожидалась ErrTaskNotFound, получено: %v", err)
 			}
-			if env.publisher.callCount() != 0 {
+			if len(env.outbox.queued()) != 0 {
 				t.Error("отсутствующая задача породила публикацию")
 			}
 		})
@@ -627,7 +612,7 @@ func TestTaskMutationsOnTerminalTask(t *testing.T) {
 					if env.repo.saveCount() != 0 {
 						t.Error("отказанная доменом команда дошла до хранилища")
 					}
-					if env.publisher.callCount() != 0 {
+					if len(env.outbox.queued()) != 0 {
 						t.Error("отказанная доменом команда породила публикацию")
 					}
 				})
@@ -657,105 +642,79 @@ func TestTaskMutationsReportStorageFailure(t *testing.T) {
 			if env.repo.saveCount() != 0 {
 				t.Error("непрочитанная задача дошла до записи")
 			}
-			if env.publisher.callCount() != 0 {
-				t.Error("непрочитанная задача породила публикацию")
+			if len(env.outbox.queued()) != 0 {
+				t.Error("непрочитанная задача породила событие")
 			}
 		})
 	}
 }
 
-func TestTaskMutationsReportDeliveryFailure(t *testing.T) {
+func TestTaskMutationsRollBackOnOutboxFailure(t *testing.T) {
 	for _, m := range taskMutations() {
 		t.Run(m.name, func(t *testing.T) {
+			// Раньше отказ доставки оставлял изменение записанным и возвращал
+			// его вызывающему отдельной ошибкой. Теперь событие пишется вместе
+			// с задачей, и отказ очереди отменяет изменение целиком: состояния
+			// «изменено, но никто не узнает» больше не существует.
 			env := newTestEnv(t)
 			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
-			publishErr := errors.New("шина недоступна")
-			env.publisher.failWith(publishErr)
+			outboxErr := errors.New("очередь недоступна")
+			env.outbox.failAdd(outboxErr)
 
 			err := m.run(t.Context(), env.service, task.ID().String(), testOwner)
-			if !errors.Is(err, app.ErrEventDeliveryFailed) {
-				t.Fatalf("ожидалась ErrEventDeliveryFailed, получено: %v", err)
-			}
-			if !errors.Is(err, publishErr) {
-				t.Errorf("отказ публикатора не сохранён в ошибке: %v", err)
+			if !errors.Is(err, outboxErr) {
+				t.Fatalf("ожидалась ошибка очереди, получено: %v", err)
 			}
 
-			var deliveryErr *app.EventDeliveryError
-			if !errors.As(err, &deliveryErr) {
-				t.Fatalf("ошибка не несёт недоставленные события: %v", err)
-			}
-			if deliveryErr.TaskID != task.ID() {
-				t.Errorf("ошибка о задаче %s, ожидалась %s", deliveryErr.TaskID, task.ID())
-			}
-			if got := todotest.EventNames(deliveryErr.Events); len(got) != 1 || got[0] != m.event {
-				t.Errorf("не доставлены события %v, ожидалось [%s]", got, m.event)
-			}
-
-			// Изменение при этом состоялось: недоставленное событие описывает
-			// то, что уже лежит в хранилище, а не то, что откатилось.
 			snapshot, ok := env.repo.stored(task.ID())
 			if !ok {
 				t.Fatal("задача исчезла из хранилища")
 			}
-			if snapshot.Version != task.Version()+1 {
-				t.Errorf("версия = %d, ожидалась %d", snapshot.Version, task.Version()+1)
+			if snapshot.Version != task.Version() {
+				t.Errorf("версия = %d, ожидалась %d — изменение не откатилось",
+					snapshot.Version, task.Version())
+			}
+			if len(env.outbox.queued()) != 0 {
+				t.Errorf("в очереди %d событий, ожидалось 0", len(env.outbox.queued()))
 			}
 		})
 	}
 }
 
-func TestTaskMutationsReportVersionConflict(t *testing.T) {
+func TestTaskMutationsRollBackOnCancellation(t *testing.T) {
 	for _, m := range taskMutations() {
 		t.Run(m.name, func(t *testing.T) {
-			env := newTestEnv(t)
-			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
-
-			// Пока сценарий держал задачу в руках, её изменил кто-то ещё.
-			env.repo.onBeforeSave(func() {
-				stale := task.Snapshot()
-				stale.Version = task.Version() + 5
-				env.repo.put(stale)
-			})
-
-			err := m.run(t.Context(), env.service, task.ID().String(), testOwner)
-			if !errors.Is(err, app.ErrVersionConflict) {
-				t.Fatalf("ожидалась ErrVersionConflict, получено: %v", err)
-			}
-			if env.publisher.callCount() != 0 {
-				t.Error("несохранённая мутация породила публикацию")
-			}
-		})
-	}
-}
-
-func TestTaskMutationsSurviveRequestCancellation(t *testing.T) {
-	for _, m := range taskMutations() {
-		t.Run(m.name, func(t *testing.T) {
+			// Клиент отвалился ровно в момент записи. До фиксации отмена
+			// законна и работу останавливает — вместе с задачей откатывается
+			// и событие о ней.
+			//
+			// Прежде было наоборот: задача сохранялась, а доставка шла с
+			// контекстом без отмены, потому что рассказать об уже случившемся
+			// изменении надо было независимо от клиента. С очередью эта забота
+			// исчезла: рассказ пишется той же транзакцией, что и изменение.
 			env := newTestEnv(t)
 			task := seedTask(t, env.repo, testOwner, todo.StatusPending)
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
-			// Клиент отвалился ровно в момент записи: задача сохранится,
-			// а вот событие о ней уйти уже «не успевает».
 			env.repo.onBeforeSave(cancel)
 
-			if err := m.run(ctx, env.service, task.ID().String(), testOwner); err != nil {
-				t.Fatalf("%s(...) вернул ошибку: %v", m.name, err)
+			err := m.run(ctx, env.service, task.ID().String(), testOwner)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("ожидалась context.Canceled, получено: %v", err)
 			}
 
-			// Отмена запроса не отменяет доставки: изменение состоялось,
-			// и рассказать о нём обязаны независимо от того, ждёт ли ответа
-			// тот, кто его заказал.
-			if env.publisher.callCount() != 1 {
-				t.Fatalf("публикатор вызван %d раз, ожидался 1", env.publisher.callCount())
+			snapshot, ok := env.repo.stored(task.ID())
+			if !ok {
+				t.Fatal("задача исчезла из хранилища")
 			}
-			if env.publisher.contextErr() != nil {
-				t.Errorf("публикатор получил отменённый контекст: %v", env.publisher.contextErr())
+			if snapshot.Version != task.Version() {
+				t.Errorf("версия = %d, ожидалась %d — отменённый запрос всё-таки записал изменение",
+					snapshot.Version, task.Version())
 			}
-			if got := env.publisher.published(); len(got) != 1 || got[0] != m.event {
-				t.Errorf("опубликованы события %v, ожидалось [%s]", got, m.event)
+			if len(env.outbox.queued()) != 0 {
+				t.Errorf("в очереди %d событий, ожидалось 0", len(env.outbox.queued()))
 			}
 		})
 	}
@@ -780,7 +739,7 @@ func TestTaskMutationsRejectCancelledRequest(t *testing.T) {
 			if env.repo.saveCount() != 0 {
 				t.Error("отменённый запрос дошёл до записи")
 			}
-			if env.publisher.callCount() != 0 {
+			if len(env.outbox.queued()) != 0 {
 				t.Error("отменённый запрос породил публикацию")
 			}
 		})
@@ -1010,7 +969,7 @@ func TestTaskStatusScenarios(t *testing.T) {
 		}
 
 		want := []string{todo.EventTaskStarted, todo.EventTaskRenamed, todo.EventTaskCompleted}
-		got := env.publisher.published()
+		got := env.outbox.queued()
 		if len(got) != len(want) {
 			t.Fatalf("опубликованы события %v, ожидались %v", got, want)
 		}
@@ -1021,7 +980,7 @@ func TestTaskStatusScenarios(t *testing.T) {
 		}
 	})
 
-	t.Run("публикатор не дёргается впустую", func(t *testing.T) {
+	t.Run("очередь не дёргается впустую", func(t *testing.T) {
 		env := newTestEnv(t)
 		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
 
@@ -1031,8 +990,8 @@ func TestTaskStatusScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CancelTask(...) вернул ошибку: %v", err)
 		}
-		if env.publisher.sawEmptyBatch() {
-			t.Error("публикатор получил пустую партию событий")
+		if env.outbox.sawEmptyBatch() {
+			t.Error("очередь получила пустую партию событий")
 		}
 	})
 }

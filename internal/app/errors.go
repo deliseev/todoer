@@ -6,12 +6,7 @@
 // доменное правило здесь не дублируется и не перепроверяется.
 package app
 
-import (
-	"errors"
-	"fmt"
-
-	"github.com/deliseev/todoer/internal/domain/todo"
-)
+import "errors"
 
 // Сентинельные ошибки слоя сценариев. Вызывающая сторона сверяет их через
 // errors.Is, поэтому обёртки обязаны использовать %w.
@@ -27,13 +22,13 @@ var (
 	// ErrVersionConflict — задачу изменили параллельно, версия устарела.
 	ErrVersionConflict = errors.New("app: task version conflict")
 
-	// ErrEventDeliveryFailed — задача записана, но события не ушли.
+	// ErrIdempotencyKeyReused — тот же ключ идемпотентности прислан с другим
+	// запросом.
 	//
-	// Отличать эту беду от отказа записи обязан вызывающий: в первом случае
-	// изменение состоялось и видно всем, кто прочтёт задачу, во втором —
-	// не произошло ничего. Для транспорта это разные ответы, поэтому
-	// текстом ошибки различие оставлять нельзя.
-	ErrEventDeliveryFailed = errors.New("app: task events were not delivered")
+	// Это не повтор, а ошибка клиента: он спросил о другом, и отдавать ему
+	// ответ на прошлый вопрос нельзя — иначе он решит, что создал одно,
+	// а создано будет другое. Транспорт отвечает на это конфликтом.
+	ErrIdempotencyKeyReused = errors.New("app: idempotency key reused with a different request")
 
 	// ErrEmptyUpdate — команда частичного изменения не несёт ни одного поля.
 	//
@@ -44,31 +39,3 @@ var (
 	// ErrMissingDependency — сервис собран без обязательной зависимости.
 	ErrMissingDependency = errors.New("app: missing dependency")
 )
-
-// EventDeliveryError — отказ доставки уже записанных изменений.
-//
-// Несёт сами события, и это не роскошь: PullEvents опустошает буфер
-// агрегата, а агрегат живёт только внутри сценария. Не отдай ошибка события
-// наружу — они исчезли бы вместе с ним, и повторить доставку было бы нечем.
-// Гарантию «не потерять» это не даёт: она появится вместе с outbox, когда
-// события начнут писаться в одной транзакции с задачей.
-type EventDeliveryError struct {
-	// TaskID — задача, изменения которой уже сохранены.
-	TaskID todo.TaskID
-	// Events — события в порядке возникновения.
-	Events []todo.DomainEvent
-	// Err — отказ, вернувшийся из публикатора.
-	Err error
-}
-
-// Error описывает отказ доставки.
-func (e *EventDeliveryError) Error() string {
-	return fmt.Sprintf("app: deliver events of task %s (%d events): %v",
-		e.TaskID, len(e.Events), e.Err)
-}
-
-// Unwrap отдаёт обе причины: сентинель слоя и отказ публикатора, —
-// поэтому errors.Is находит и ErrEventDeliveryFailed, и ошибку реализации.
-func (e *EventDeliveryError) Unwrap() []error {
-	return []error{ErrEventDeliveryFailed, e.Err}
-}

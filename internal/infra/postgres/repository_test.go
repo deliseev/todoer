@@ -239,8 +239,16 @@ func TestMigrate(t *testing.T) {
 		}
 	})
 
-	t.Run("откат снимает схему", func(t *testing.T) {
+	t.Run("откат снимает последнюю миграцию", func(t *testing.T) {
 		t.Parallel()
+
+		// Ожидание считается от вшитых миграций, а не задаётся числом: команда
+		// обещает шаг назад, и это обещание не должно переписываться при
+		// каждой новой миграции.
+		expected, err := postgres.ExpectedSchemaVersion()
+		if err != nil {
+			t.Fatalf("ExpectedSchemaVersion() вернула ошибку: %v", err)
+		}
 
 		dsn := pgtest.NewDSN(t)
 
@@ -252,8 +260,8 @@ func TestMigrate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SchemaVersion(...) вернула ошибку: %v", err)
 		}
-		if version != 0 {
-			t.Errorf("версия схемы после отката = %d, ожидался ноль", version)
+		if version != expected-1 {
+			t.Errorf("версия схемы после отката = %d, ожидалась %d", version, expected-1)
 		}
 	})
 }

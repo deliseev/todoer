@@ -25,26 +25,31 @@ const otherOwner = "user-13"
 
 // testEnv — сервис вместе со своими подставными зависимостями.
 type testEnv struct {
-	service   *app.TaskService
-	repo      *fakeRepository
-	publisher *recordingPublisher
-	clock     *stubClock
+	service *app.TaskService
+	repo    *fakeRepository
+	outbox  *fakeOutbox
+	keys    *fakeKeys
+	clock   *stubClock
 }
 
 // newTestEnv собирает сервис на подставных зависимостях с часами на testNow.
+//
+// Хранилище одно и то же по обе стороны: изменения идут через единицу работы,
+// чтения — мимо неё, но видят они одно и то же состояние.
 func newTestEnv(t *testing.T) testEnv {
 	t.Helper()
 
 	repo := newFakeRepository()
-	publisher := &recordingPublisher{}
+	outbox := newFakeOutbox()
 	clock := &stubClock{at: testNow}
+	uow := newFakeUnitOfWork(repo, outbox)
 
-	service, err := app.NewTaskService(repo, publisher, clock)
+	service, err := app.NewTaskService(uow, repo, clock)
 	if err != nil {
 		t.Fatalf("NewTaskService(...) вернул ошибку: %v", err)
 	}
 
-	return testEnv{service: service, repo: repo, publisher: publisher, clock: clock}
+	return testEnv{service: service, repo: repo, outbox: outbox, keys: uow.keys, clock: clock}
 }
 
 // seedTask кладёт в хранилище задачу указанного владельца, доведённую до

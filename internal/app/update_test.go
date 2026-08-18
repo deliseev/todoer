@@ -61,7 +61,7 @@ func TestUpdateTask(t *testing.T) {
 		}
 	})
 
-	t.Run("публикуются события всех применённых изменений", func(t *testing.T) {
+	t.Run("в очередь ложатся события всех применённых изменений", func(t *testing.T) {
 		env := newTestEnv(t)
 		task := seedTask(t, env.repo, testOwner, todo.StatusPending)
 
@@ -76,7 +76,7 @@ func TestUpdateTask(t *testing.T) {
 		}
 
 		want := []string{todo.EventTaskRenamed, todo.EventTaskPriorityChanged}
-		got := env.publisher.published()
+		got := env.outbox.queued()
 		if len(got) != len(want) {
 			t.Fatalf("опубликованы события %v, ожидались %v", got, want)
 		}
@@ -85,8 +85,10 @@ func TestUpdateTask(t *testing.T) {
 				t.Fatalf("опубликованы события %v, ожидались %v", got, want)
 			}
 		}
-		if env.publisher.callCount() != 1 {
-			t.Errorf("публикатор вызван %d раз, ожидался 1", env.publisher.callCount())
+		// Одна команда — одна порция: события всей команды ложатся в очередь
+		// разом, а не по одному за поле.
+		if env.outbox.addCount() != 1 {
+			t.Errorf("очередь пополнена %d раз, ожидался 1", env.outbox.addCount())
 		}
 	})
 
@@ -172,7 +174,7 @@ func TestUpdateTask(t *testing.T) {
 		if env.repo.saveCount() != 0 {
 			t.Error("пустая команда дошла до записи")
 		}
-		if env.publisher.callCount() != 0 {
+		if len(env.outbox.queued()) != 0 {
 			t.Error("пустая команда породила публикацию")
 		}
 	})
@@ -323,7 +325,7 @@ func TestUpdateTask(t *testing.T) {
 		if want := stored.Version + 1; after.Version != want {
 			t.Errorf("версия = %d, ожидалась %d", after.Version, want)
 		}
-		if got := env.publisher.published(); len(got) != 1 || got[0] != todo.EventTaskRenamed {
+		if got := env.outbox.queued(); len(got) != 1 || got[0] != todo.EventTaskRenamed {
 			t.Errorf("опубликованы события %v, ожидалось [%s]", got, todo.EventTaskRenamed)
 		}
 	})
@@ -390,7 +392,7 @@ func TestUpdateTask(t *testing.T) {
 		if !after.UpdatedAt.Equal(before.UpdatedAt) {
 			t.Errorf("updatedAt = %s, ожидалось %s", after.UpdatedAt, before.UpdatedAt)
 		}
-		if published := env.publisher.published(); len(published) != 0 {
+		if published := env.outbox.queued(); len(published) != 0 {
 			t.Errorf("опубликовано %v, ожидалось пусто", published)
 		}
 	})
