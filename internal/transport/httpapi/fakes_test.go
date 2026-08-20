@@ -24,6 +24,8 @@ type fakeService struct {
 	createErr error
 	view      app.TaskView
 	getErr    error
+	page      app.TaskPage
+	listErr   error
 	updateErr error
 	startErr  error
 	doneErr   error
@@ -32,6 +34,7 @@ type fakeService struct {
 	// Что приехало.
 	createCmd app.CreateTaskCommand
 	getQuery  app.GetTaskQuery
+	listQuery app.ListTasksQuery
 	updateCmd app.UpdateTaskCommand
 	startCmd  app.StartTaskCommand
 	doneCmd   app.CompleteTaskCommand
@@ -81,6 +84,15 @@ func (s *fakeService) GetTask(_ context.Context, query app.GetTaskQuery) (app.Ta
 		return app.TaskView{}, s.getErr
 	}
 	return s.view, nil
+}
+
+func (s *fakeService) ListTasks(_ context.Context, query app.ListTasksQuery) (app.TaskPage, error) {
+	s.record("ListTasks")
+	s.listQuery = query
+	if s.listErr != nil {
+		return app.TaskPage{}, s.listErr
+	}
+	return s.page, nil
 }
 
 func (s *fakeService) UpdateTask(_ context.Context, cmd app.UpdateTaskCommand) error {

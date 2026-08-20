@@ -649,6 +649,230 @@ func TestStatusActions(t *testing.T) {
 	}
 }
 
+// TestListTasks: GET /tasks.
+//
+// Транспорт здесь не решает ничего: шесть параметров строки запроса уезжают
+// в сценарий сырыми строками, обратно приезжает страница. Разбор лимита,
+// сортировки и курсора — работа app, и проверять её здесь незачем.
+func TestListTasks(t *testing.T) {
+	t.Run("параметры уезжают в сценарий сырыми", func(t *testing.T) {
+		service := newFakeService()
+		service.page = testPage()
+
+		rec := do(t, newTestServer(t, service), http.MethodGet,
+			"/tasks?status=pending&priority=high&due=today&sort=-due&limit=5&after="+testCursor, "")
+
+		requireStatus(t, rec, http.StatusOK)
+
+		// Сравнение целиком, а не по полям: так ловится и параметр,
+		// подключённый не к тому полю, — обе стороны строковые, и такая
+		// ошибка скомпилировалась бы молча.
+		want := app.ListTasksQuery{
+			OwnerID:  testOwner,
+			Status:   "pending",
+			Priority: "high",
+			Due:      "today",
+			Sort:     "-due",
+			Limit:    "5",
+			After:    testCursor,
+		}
+		if service.listQuery != want {
+			t.Errorf("запрос = %#v, ожидался %#v", service.listQuery, want)
+		}
+	})
+
+	t.Run("значения не правятся по дороге", func(t *testing.T) {
+		// Обрезать пробелы, приводить регистр и отвергать негодное — работа
+		// сценария: сделай это транспорт, у правила стало бы два носителя,
+		// а второй транспорт завёл бы третий.
+		service := newFakeService()
+
+		do(t, newTestServer(t, service), http.MethodGet, "/tasks?status=+PENDING+&limit=abc", "")
+
+		if got := service.listQuery.Status; got != " PENDING " {
+			t.Errorf("статус в запросе = %q, ожидался %q", got, " PENDING ")
+		}
+		if got := service.listQuery.Limit; got != "abc" {
+			t.Errorf("лимит в запросе = %q, ожидался %q", got, "abc")
+		}
+	})
+
+	t.Run("пустая строка запроса — пустые поля", func(t *testing.T) {
+		// Умолчания ставит сценарий, а не транспорт: он и так знает про
+		// DefaultListLimit и сортировку по умолчанию.
+		service := newFakeService()
+
+		requireStatus(t, do(t, newTestServer(t, service), http.MethodGet, "/tasks", ""), http.StatusOK)
+
+		if want := (app.ListTasksQuery{OwnerID: testOwner}); service.listQuery != want {
+			t.Errorf("запрос = %#v, ожидался %#v", service.listQuery, want)
+		}
+	})
+
+	t.Run("страница отдаётся списком и курсором", func(t *testing.T) {
+		service := newFakeService()
+		service.page = testPage()
+
+		rec := do(t, newTestServer(t, service), http.MethodGet, "/tasks", "")
+
+		requireStatus(t, rec, http.StatusOK)
+		requireJSONContentType(t, rec)
+
+		body := decodeBody(t, rec)
+		if len(body) != 2 {
+			t.Errorf("полей в ответе %d, ожидалось 2 (%v)", len(body), body)
+		}
+		if got := body["next"]; got != testCursor {
+			t.Errorf("next = %#v, ожидался %q", got, testCursor)
+		}
+
+		tasks, ok := body["tasks"].([]any)
+		if !ok {
+			t.Fatalf("поле tasks не массив: %#v", body["tasks"])
+		}
+		if len(tasks) != 1 {
+			t.Fatalf("задач в ответе %d, ожидалась 1", len(tasks))
+		}
+
+		// Задача на проводе та же, что и у чтения одной: форма ответа
+		// у списка и у GET /tasks/{id} обязана совпадать, иначе клиент
+		// разбирает задачу двумя способами.
+		task, ok := tasks[0].(map[string]any)
+		if !ok {
+			t.Fatalf("задача в списке не объект: %#v", tasks[0])
+		}
+		want := map[string]any{
+			"id":           testTaskID,
+			"owner_id":     testOwner,
+			"title":        "Купить молоко",
+			"description":  "Два литра, в магазине у дома",
+			"status":       "pending",
+			"priority":     "normal",
+			"due_date":     "2026-08-14T12:00:00Z",
+			"created_at":   "2026-08-13T12:00:00Z",
+			"updated_at":   "2026-08-13T12:00:00Z",
+			"completed_at": nil,
+			"version":      float64(1),
+		}
+		for key, wantValue := range want {
+			got, present := task[key]
+			if !present {
+				t.Errorf("поля %q нет у задачи в списке", key)
+				continue
+			}
+			if got != wantValue {
+				t.Errorf("%s = %#v, ожидалось %#v", key, got, wantValue)
+			}
+		}
+		if len(task) != len(want) {
+			t.Errorf("полей у задачи %d, ожидалось %d (%v)", len(task), len(want), task)
+		}
+	})
+
+	t.Run("последняя страница отдаёт next null", func(t *testing.T) {
+		// Именно null, а не отсутствие поля: клиент обязан отличать «дальше
+		// ничего нет» от «сервер про курсор не знает» — то же правило, по
+		// которому null отдаёт срок.
+		service := newFakeService()
+		service.page = app.TaskPage{Tasks: []app.TaskView{testView()}}
+
+		body := decodeBody(t, do(t, newTestServer(t, service), http.MethodGet, "/tasks", ""))
+
+		next, present := body["next"]
+		if !present {
+			t.Fatalf("поля next нет в ответе: %v", body)
+		}
+		if next != nil {
+			t.Errorf("next = %#v, ожидался null", next)
+		}
+	})
+
+	t.Run("пустая страница — пустой массив, а не null", func(t *testing.T) {
+		// Нулевой срез в Go кодируется как null, и клиент, идущий по списку,
+		// на этом спотыкается. Ловушка стоит своего теста: чтобы в неё
+		// попасть, достаточно не написать ни строчки.
+		service := newFakeService()
+		service.page = app.TaskPage{}
+
+		rec := do(t, newTestServer(t, service), http.MethodGet, "/tasks", "")
+
+		requireStatus(t, rec, http.StatusOK)
+
+		tasks, ok := decodeBody(t, rec)["tasks"].([]any)
+		if !ok {
+			t.Fatalf("поле tasks не массив (пустой список отдан как null?): %s", rec.Body.String())
+		}
+		if len(tasks) != 0 {
+			t.Errorf("задач в ответе %d, ожидалось 0", len(tasks))
+		}
+	})
+
+	t.Run("владелец обязателен", func(t *testing.T) {
+		service := newFakeService()
+
+		rec := send(newTestServer(t, service), newRequest(t, http.MethodGet, "/tasks", ""))
+
+		requireStatus(t, rec, http.StatusBadRequest)
+		if service.totalCalls() != 0 {
+			t.Errorf("сценарий звали %d раз, ожидалось 0", service.totalCalls())
+		}
+	})
+
+	t.Run("отказ сценария переводится в код", func(t *testing.T) {
+		service := newFakeService()
+		service.listErr = app.ErrInvalidListQuery
+
+		rec := do(t, newTestServer(t, service), http.MethodGet, "/tasks?limit=0", "")
+
+		requireStatus(t, rec, http.StatusBadRequest)
+	})
+}
+
+// TestListQueryStrictness: строка запроса разбирается строго — по той же
+// причине, по которой строго разбирается тело.
+//
+// Опечатка в имени параметра иначе отвечает успехом: клиент просил отбор,
+// получил весь список и решил, что задач такого рода просто много. Отказ
+// обязан случиться до сценария — просить его нечего.
+func TestListQueryStrictness(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"неизвестный параметр", "/tasks?statuss=pending"},
+		{"опечатка рядом с годным параметром", "/tasks?limit=5&sortt=due"},
+		// Query().Get молча берёт первое значение, и второе пропадает
+		// незаметно — та же потеря, что и у неизвестного параметра.
+		{"параметр повторён", "/tasks?status=pending&status=done"},
+		{"негодная процентная последовательность", "/tasks?status=%zz"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := newFakeService()
+
+			rec := do(t, newTestServer(t, service), http.MethodGet, tc.target, "")
+
+			requireStatus(t, rec, http.StatusBadRequest)
+			requireJSONContentType(t, rec)
+			if service.totalCalls() != 0 {
+				t.Errorf("сценарий звали %d раз, ожидалось 0", service.totalCalls())
+			}
+		})
+	}
+
+	t.Run("годные параметры проходят все", func(t *testing.T) {
+		// Обратная сторона строгости: список известных имён обязан совпадать
+		// с полями ListTasksQuery, иначе строгость отвергала бы законное.
+		service := newFakeService()
+
+		rec := do(t, newTestServer(t, service), http.MethodGet,
+			"/tasks?status=pending&priority=high&due=overdue&sort=created&limit=10&after="+testCursor, "")
+
+		requireStatus(t, rec, http.StatusOK)
+	})
+}
+
 func TestErrorMapping(t *testing.T) {
 	// Единственное место, где транспорт знает про сентинели. Таблица общая,
 	// чтобы новый сентинель попадал под проверку одной строкой, а не тремя
@@ -661,6 +885,7 @@ func TestErrorMapping(t *testing.T) {
 		{"задачи нет", app.ErrTaskNotFound, http.StatusNotFound},
 		{"конфликт версий", app.ErrVersionConflict, http.StatusConflict},
 		{"пустая команда", app.ErrEmptyUpdate, http.StatusBadRequest},
+		{"негодный запрос списка", app.ErrInvalidListQuery, http.StatusBadRequest},
 		{"негодный идентификатор", todo.ErrInvalidTaskID, http.StatusBadRequest},
 		{"пустой заголовок", todo.ErrEmptyTitle, http.StatusBadRequest},
 		{"описание слишком длинное", todo.ErrDescriptionTooLong, http.StatusBadRequest},

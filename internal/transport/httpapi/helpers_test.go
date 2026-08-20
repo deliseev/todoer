@@ -24,6 +24,10 @@ const (
 	testOwner = "user-42"
 	// testTaskID — валидный идентификатор задачи: 32 шестнадцатеричных знака.
 	testTaskID = "0123456789abcdef0123456789abcdef"
+	// testCursor — курсор в том виде, в каком его отдаёт сценарий. Транспорт
+	// в него не заглядывает и заглядывать не должен: для него это строка,
+	// которую он переносит от ответа к следующему запросу.
+	testCursor = "eyJzIjoiZHVlIiwiaSI6IjAxMjMifQ"
 )
 
 // mustTaskID разбирает опорный идентификатор задачи или валит тест.
@@ -54,6 +58,14 @@ func testView() app.TaskView {
 		CreatedAt:   testNow,
 		UpdatedAt:   testNow,
 		Version:     1,
+	}
+}
+
+// testPage — типовой ответ сценария списка: одна задача и курсор дальше.
+func testPage() app.TaskPage {
+	return app.TaskPage{
+		Tasks:      []app.TaskView{testView()},
+		NextCursor: testCursor,
 	}
 }
 

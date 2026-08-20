@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -278,6 +282,52 @@ func TestRun(t *testing.T) {
 		}
 	})
 
+	t.Run("список отдаётся страницами", func(t *testing.T) {
+		t.Parallel()
+
+		// Единственное место, где курсор проходит весь путь: у транспорта
+		// сценарий — двойник, у хранилища нет ни транспорта, ни сценария,
+		// и только здесь строка из ответа клиента возвращается в SQL.
+		dsn := pgtest.NewDSN(t)
+		addr, stop := start(t, dsn)
+		defer stop()
+
+		// Сроки возрастают вместе с порядком создания: сортировка по
+		// умолчанию — ближайший срок первым, поэтому ожидаемый порядок
+		// известен заранее.
+		due := time.Now().Add(24 * time.Hour)
+		want := []string{"Первая", "Вторая", "Третья"}
+
+		for i, title := range want {
+			at := due.Add(time.Duration(i) * time.Hour).Format(time.RFC3339)
+			created := do(t, request(t, http.MethodPost, "http://"+addr+"/tasks",
+				fmt.Sprintf(`{"title":%q,"due_date":%q}`, title, at)))
+			if created.StatusCode != http.StatusCreated {
+				t.Fatalf("код ответа на создание = %d, ожидался %d", created.StatusCode, http.StatusCreated)
+			}
+		}
+
+		var got []string
+		target := "http://" + addr + "/tasks?limit=2"
+
+		// Потолок проходов, а не цикл до последней страницы: сломанный курсор
+		// иначе повесил бы тест вместо того, чтобы его уронить.
+		for range 5 {
+			page := listPage(t, target)
+			for _, task := range page.Tasks {
+				got = append(got, task.Title)
+			}
+			if page.Next == nil {
+				break
+			}
+			target = "http://" + addr + "/tasks?limit=2&after=" + url.QueryEscape(*page.Next)
+		}
+
+		if !slices.Equal(got, want) {
+			t.Errorf("проход по страницам отдал %v, ожидалось %v", got, want)
+		}
+	})
+
 	t.Run("задача переживает перезапуск", func(t *testing.T) {
 		t.Parallel()
 
@@ -293,6 +343,35 @@ func TestRun(t *testing.T) {
 				read.StatusCode, http.StatusOK)
 		}
 	})
+}
+
+// taskPage — страница списка в том виде, в каком её читает клиент.
+//
+// Из всей задачи берётся заголовок: здесь проверяется, что страницы сходятся
+// в один список без потерь и повторов, а форма задачи на проводе — забота
+// тестов транспорта.
+type taskPage struct {
+	Tasks []struct {
+		Title string `json:"title"`
+	} `json:"tasks"`
+	Next *string `json:"next"`
+}
+
+// listPage читает одну страницу списка.
+func listPage(t *testing.T, target string) taskPage {
+	t.Helper()
+
+	resp := do(t, request(t, http.MethodGet, target, ""))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("код ответа на список = %d, ожидался %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var page taskPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("тело списка не разобралось: %v", err)
+	}
+
+	return page
 }
 
 // createTask поднимает сервер, создаёт задачу и останавливает сервер,

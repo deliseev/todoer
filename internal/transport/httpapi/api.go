@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -58,6 +59,7 @@ const idempotencyHeader = "Idempotency-Key"
 type TaskService interface {
 	CreateTask(ctx context.Context, cmd app.CreateTaskCommand) (todo.TaskID, error)
 	GetTask(ctx context.Context, query app.GetTaskQuery) (app.TaskView, error)
+	ListTasks(ctx context.Context, query app.ListTasksQuery) (app.TaskPage, error)
 	UpdateTask(ctx context.Context, cmd app.UpdateTaskCommand) error
 	StartTask(ctx context.Context, cmd app.StartTaskCommand) error
 	CompleteTask(ctx context.Context, cmd app.CompleteTaskCommand) error
@@ -101,6 +103,7 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /tasks", withOwner(h.createTask))
+	mux.HandleFunc("GET /tasks", withOwner(h.listTasks))
 	mux.HandleFunc("GET /tasks/{id}", withOwner(h.getTask))
 	mux.HandleFunc("PATCH /tasks/{id}", withOwner(h.updateTask))
 	mux.HandleFunc("POST /tasks/{id}/start", withOwner(h.startTask))
@@ -205,6 +208,32 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request, owner string) 
 	}
 
 	writeJSON(w, http.StatusOK, newTaskResponse(view))
+}
+
+// listTasks отдаёт страницу списка задач владельца: GET /tasks.
+//
+// Отбор, порядок, размер страницы и место продолжения приезжают строкой
+// запроса и уезжают в сценарий сырыми строками — ровно как поля тела. Ни
+// лимита, ни сортировки, ни курсора транспорт не разбирает: у него нет ни
+// фабрик todo, ни представления о странице по умолчанию, и заведи он их,
+// второй транспорт завёл бы свои.
+func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request, owner string) {
+	query, err := listQuery(r, owner)
+	if err != nil {
+		// Текст свой, собранный здесь же, — чужой наружу по-прежнему не
+		// уезжает. Назвать негодный параметр можно и нужно: клиент прислал
+		// его сам, а без имени ему нечего чинить.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	page, err := h.service.ListTasks(r.Context(), query)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, newTaskPageResponse(page))
 }
 
 // updateTask меняет заданные поля задачи: PATCH /tasks/{id}.
@@ -353,6 +382,60 @@ func isTooLarge(err error) bool {
 	return ok
 }
 
+// listParams — параметры строки запроса GET /tasks и их место в запросе
+// сценария.
+//
+// Таблица одна и на разбор, и на проверку: неизвестное имя отвергается по
+// ней же, поэтому новый параметр — одна строка здесь, а не строка тут и
+// строка в отдельном списке известных, которые разъехались бы.
+var listParams = map[string]func(*app.ListTasksQuery, string){
+	"status":   func(q *app.ListTasksQuery, value string) { q.Status = value },
+	"priority": func(q *app.ListTasksQuery, value string) { q.Priority = value },
+	"due":      func(q *app.ListTasksQuery, value string) { q.Due = value },
+	"sort":     func(q *app.ListTasksQuery, value string) { q.Sort = value },
+	"limit":    func(q *app.ListTasksQuery, value string) { q.Limit = value },
+	"after":    func(q *app.ListTasksQuery, value string) { q.After = value },
+}
+
+// listQuery собирает запрос списка из строки запроса.
+//
+// Разбор строгий — по той же причине, по которой строг разбор тела. Опечатка
+// в имени параметра иначе отвечает успехом: клиент просил отбор, получил весь
+// список и решил, что задач такого рода просто много. Молчаливого пропуска
+// здесь три вида, и закрыты все три — негодная строка, неизвестное имя,
+// повторённое имя.
+//
+// Значения не правятся по дороге: ни пробелов по краям, ни регистра. Обрезать
+// и приводить — работа сценария, и сделай это транспорт, у правила стало бы
+// два носителя.
+func listQuery(r *http.Request, owner string) (app.ListTasksQuery, error) {
+	// Своим разбором, а не через r.URL.Query(): та молча выбрасывает пары,
+	// которые не разобрались, и «?status=%zz» приехал бы запросом вообще без
+	// отбора — то есть полным списком вместо отказа.
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return app.ListTasksQuery{}, errors.New("malformed query string")
+	}
+
+	query := app.ListTasksQuery{OwnerID: owner}
+
+	for name, got := range values {
+		assign, known := listParams[name]
+		if !known {
+			return app.ListTasksQuery{}, fmt.Errorf("unknown query parameter %q", name)
+		}
+		// Повтор — та же потеря, что и опечатка: одно из присланных значений
+		// молча не доехало бы, потому что берётся первое.
+		if len(got) > 1 {
+			return app.ListTasksQuery{}, fmt.Errorf("query parameter %q repeated", name)
+		}
+
+		assign(&query, got[0])
+	}
+
+	return query, nil
+}
+
 // createTaskRequest — тело POST /tasks.
 //
 // Владелец сюда не входит: он приезжает заголовком, и принимать его ещё и
@@ -454,6 +537,34 @@ func newTaskResponse(view app.TaskView) taskResponse {
 	}
 }
 
+// taskPageResponse — страница списка на проводе.
+//
+// Курсор — указатель и на последней странице уезжает как null, а не
+// пропадает: клиент обязан отличать «дальше ничего нет» от «поле не пришло»,
+// по тому же правилу, по которому null отдаёт срок.
+type taskPageResponse struct {
+	Tasks []taskResponse `json:"tasks"`
+	Next  *string        `json:"next"`
+}
+
+// newTaskPageResponse перекладывает страницу сценария на провод.
+func newTaskPageResponse(page app.TaskPage) taskPageResponse {
+	// Срез создаётся всегда, даже нулевой длины: нулевой срез кодируется как
+	// null, и клиент, идущий по списку, на пустой странице спотыкается. Чтобы
+	// попасть в эту ловушку, довольно не написать ни строчки.
+	tasks := make([]taskResponse, 0, len(page.Tasks))
+	for _, view := range page.Tasks {
+		tasks = append(tasks, newTaskResponse(view))
+	}
+
+	response := taskPageResponse{Tasks: tasks}
+	if page.NextCursor != "" {
+		response.Next = new(page.NextCursor)
+	}
+
+	return response
+}
+
 // errorResponse — тело любого отказа.
 //
 // Одно поле: разбирать причину машинно клиенту незачем, для этого есть код
@@ -529,9 +640,12 @@ func statusFor(err error) int {
 		errors.Is(err, todo.ErrUnknownPriority),
 		errors.Is(err, todo.ErrUnknownStatus),
 		errors.Is(err, app.ErrEmptyUpdate),
-		errors.Is(err, app.ErrIdempotencyKeyTooLong):
+		errors.Is(err, app.ErrIdempotencyKeyTooLong),
+		errors.Is(err, app.ErrInvalidListQuery):
 		// Негодный ввод: команда не разобралась в значимые объекты домена,
-		// не несёт ни одного поля либо пришла с непомерным ключом. Сентинели перечислены поимённо, а не
+		// не несёт ни одного поля, пришла с непомерным ключом либо просит
+		// список с негодным лимитом, сортировкой или курсором. Сентинели
+		// перечислены поимённо, а не
 		// сведены к правилу «всё из todo — 400»: конфликт состояния приходит
 		// оттуда же, и такое правило отвечало бы на него 400 вместо 409.
 		return http.StatusBadRequest
