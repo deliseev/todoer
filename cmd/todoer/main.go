@@ -113,11 +113,14 @@ func databaseURL() string {
 // newTaskService собирает сервис на боевых реализациях портов.
 //
 // Изменения идут через единицу работы, чтения — мимо неё: задачу и её события
-// надо записать вместе, а прочитать задачу можно и без транзакции.
-func newTaskService(uow app.UnitOfWork, repo app.Repository) (*app.TaskService, error) {
+// надо записать вместе, а прочитать задачу можно и без транзакции. Списки
+// приходят третьим портом, а не расширением хранилища: они не поднимают
+// агрегат и отдают плоское представление.
+func newTaskService(uow app.UnitOfWork, repo app.Repository, queries app.TaskQueries) (*app.TaskService, error) {
 	return app.NewTaskService(
 		uow,
 		repo,
+		queries,
 		infra.SystemClock{},
 	)
 }
@@ -154,7 +157,11 @@ func run(ctx context.Context, out io.Writer, addr, dsn string) error {
 		return err
 	}
 
-	service, err := newTaskService(postgres.NewUnitOfWork(pool), postgres.NewTaskRepository(pool))
+	service, err := newTaskService(
+		postgres.NewUnitOfWork(pool),
+		postgres.NewTaskRepository(pool),
+		postgres.NewTaskQueries(pool),
+	)
 	if err != nil {
 		return fmt.Errorf("build task service: %w", err)
 	}

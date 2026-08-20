@@ -184,37 +184,7 @@ func (s *TaskService) GetTask(ctx context.Context, query GetTaskQuery) (TaskView
 		return TaskView{}, err
 	}
 
-	return newTaskView(task.Snapshot()), nil
-}
-
-// newTaskView раскладывает снимок в плоское представление для чтения.
-func newTaskView(snapshot todo.TaskSnapshot) TaskView {
-	view := TaskView{
-		ID:          snapshot.ID.String(),
-		OwnerID:     snapshot.OwnerID.String(),
-		Title:       snapshot.Title.String(),
-		Description: snapshot.Description.String(),
-		Status:      snapshot.Status.String(),
-		Priority:    snapshot.Priority.String(),
-		CreatedAt:   snapshot.CreatedAt,
-		UpdatedAt:   snapshot.UpdatedAt,
-		Version:     snapshot.Version,
-	}
-	// Оба необязательных поля копируются, и одинаково. Сегодня снимок приходит
-	// из Task.Snapshot(), где указатели уже клонированы, но функция принимает
-	// любой TaskSnapshot: первый же порт запросов, собравший снимок мимо
-	// агрегата, отдал бы наружу записываемое окно в хранилище — ровно та дыра,
-	// ради которой в домене заведён clonePtr.
-	if snapshot.DueDate != nil {
-		dueDate := snapshot.DueDate.Time()
-		view.DueDate = &dueDate
-	}
-	if snapshot.CompletedAt != nil {
-		completedAt := *snapshot.CompletedAt
-		view.CompletedAt = &completedAt
-	}
-
-	return view
+	return NewTaskView(task.Snapshot()), nil
 }
 
 // RenameTask меняет заголовок задачи.

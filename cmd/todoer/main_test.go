@@ -35,7 +35,11 @@ func TestNewTaskService(t *testing.T) {
 		}
 		t.Cleanup(pool.Close)
 
-		service, err := newTaskService(postgres.NewUnitOfWork(pool), postgres.NewTaskRepository(pool))
+		service, err := newTaskService(
+			postgres.NewUnitOfWork(pool),
+			postgres.NewTaskRepository(pool),
+			postgres.NewTaskQueries(pool),
+		)
 		if err != nil {
 			t.Fatalf("newTaskService() вернул ошибку: %v", err)
 		}

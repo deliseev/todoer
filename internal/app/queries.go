@@ -38,6 +38,41 @@ type TaskView struct {
 	Version     int
 }
 
+// NewTaskView раскладывает снимок в плоское представление для чтения.
+//
+// Экспортирована ради реализаций TaskQueries: представление собирает не один
+// GetTask, и разложи каждая реализация снимок по полям сама, у отображения
+// стало бы столько носителей, сколько хранилищ. Новое поле TaskView иначе
+// появлялось бы в чтении одной задачи и молча отсутствовало в списке.
+func NewTaskView(snapshot todo.TaskSnapshot) TaskView {
+	view := TaskView{
+		ID:          snapshot.ID.String(),
+		OwnerID:     snapshot.OwnerID.String(),
+		Title:       snapshot.Title.String(),
+		Description: snapshot.Description.String(),
+		Status:      snapshot.Status.String(),
+		Priority:    snapshot.Priority.String(),
+		CreatedAt:   snapshot.CreatedAt,
+		UpdatedAt:   snapshot.UpdatedAt,
+		Version:     snapshot.Version,
+	}
+	// Оба необязательных поля копируются, и одинаково. Сегодня снимок приходит
+	// из Task.Snapshot(), где указатели уже клонированы, но функция принимает
+	// любой TaskSnapshot: первый же порт запросов, собравший снимок мимо
+	// агрегата, отдал бы наружу записываемое окно в хранилище — ровно та дыра,
+	// ради которой в домене заведён clonePtr.
+	if snapshot.DueDate != nil {
+		dueDate := snapshot.DueDate.Time()
+		view.DueDate = &dueDate
+	}
+	if snapshot.CompletedAt != nil {
+		completedAt := *snapshot.CompletedAt
+		view.CompletedAt = &completedAt
+	}
+
+	return view
+}
+
 // ListTasksQuery — чтение списка задач владельца.
 //
 // Поля сырые, как и у команд: разбирать строки в значимые объекты — работа
